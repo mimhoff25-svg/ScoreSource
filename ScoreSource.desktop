@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ScoreSource
+Comment=ScoreSource PySide6 scoreboard
+Exec=/home/mike/projects/ScoreScource/launch_scoresource.sh
+Icon=/home/mike/projects/ScoreScource/pyside/scoresource.svg
+Terminal=false
+Categories=Sports;Game;Utility;
+StartupNotify=true
