@@ -96,42 +96,6 @@ PBP_TICKER_MAX = 12
 PBP_TICKER_SEPARATOR = "  |  "
 FADE_DURATION_MS = 180
 CITY_FONT_SIZE = 16
-MLB_BG_BASE = "#121a28"
-MLB_BG_LOGO_OPACITY = 0.14
-TEAM_BG_BASE = "#121a28"
-SPORT_BG_BLEND_FACTORS = {
-    "NBA": 0.23,
-    "NFL": 0.24,
-    "NHL": 0.24,
-    "MLB": 0.22,
-    "NCAA FOOTBALL": 0.26,
-    "MLS": 0.24,
-}
-SPORT_TEAM_BG_OVERRIDES = {
-    "MLB": {
-        "MIN": "#5d86b8",
-        "TB": "#4f79ad",
-        "SEA": "#5b88a8",
-    },
-    "NBA": {
-        "MIN": "#6f95c8",
-        "MEM": "#6f8fb9",
-        "DAL": "#6f94bf",
-        "OKC": "#6d95bf",
-    },
-    "NFL": {
-        "TEN": "#668cb7",
-        "DET": "#6fa5d6",
-        "SEA": "#5f90b8",
-        "DAL": "#6e8fb9",
-    },
-    "NHL": {
-        "TOR": "#6b8dbc",
-        "TBL": "#6f9dc7",
-        "WPG": "#6688b2",
-        "COL": "#7d6ea8",
-    },
-}
 NBA_PLAYER_COL_WIDTH = 150
 NBA_POS_COL_WIDTH = 46
 NBA_MIN_COL_WIDTH = 70
@@ -1432,22 +1396,6 @@ class ScoreSourceWindow(QMainWindow):
         self.right_bg.setStyleSheet("background: transparent;")
         top_bg_layout.addWidget(self.left_bg)
         top_bg_layout.addWidget(self.right_bg)
-        self.away_bg_logo = QLabel(self.left_bg)
-        self.away_bg_logo.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.away_bg_logo.setAlignment(Qt.AlignCenter)
-        self.away_bg_logo.setStyleSheet("background: transparent;")
-        self.away_bg_logo_effect = QGraphicsOpacityEffect(self.away_bg_logo)
-        self.away_bg_logo_effect.setOpacity(0.0)
-        self.away_bg_logo.setGraphicsEffect(self.away_bg_logo_effect)
-        self.away_bg_logo.lower()
-        self.home_bg_logo = QLabel(self.right_bg)
-        self.home_bg_logo.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self.home_bg_logo.setAlignment(Qt.AlignCenter)
-        self.home_bg_logo.setStyleSheet("background: transparent;")
-        self.home_bg_logo_effect = QGraphicsOpacityEffect(self.home_bg_logo)
-        self.home_bg_logo_effect.setOpacity(0.0)
-        self.home_bg_logo.setGraphicsEffect(self.home_bg_logo_effect)
-        self.home_bg_logo.lower()
         self.nfl_bow_left = QFrame(self.left_bg)
         self.nfl_bow_left.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.nfl_bow_left.setStyleSheet("background: transparent; border: none;")
@@ -2318,9 +2266,6 @@ class ScoreSourceWindow(QMainWindow):
             self._clock_state = None
             self.clock_feed_interval_avg = None
             self._last_cross_sport_prefetch_ts = 0.0
-            if self.sport_name.upper() != "MLB":
-                self._set_background_logo("away", None)
-                self._set_background_logo("home", None)
         if not self._has_displayed_scores:
             runtime_scores = self._runtime_scores_snapshot(self.sport_name)
             if runtime_scores:
@@ -2951,22 +2896,11 @@ class ScoreSourceWindow(QMainWindow):
         right_alt = self._team_alt_color(right_tri)
         left_secondary = self._team_secondary_color(left_tri)
         right_secondary = self._team_secondary_color(right_tri)
-        sport = self.sport_name.upper()
-        if sport == "NHL":
+        if self.sport_name.upper() == "NHL":
             left_secondary = left_alt
             right_secondary = right_alt
-        left_color = self._tuned_team_bg_color(sport, left_tri, left_color)
-        right_color = self._tuned_team_bg_color(sport, right_tri, right_color)
-        left_secondary = self._tuned_team_bg_color(sport, left_tri, left_secondary, secondary=True)
-        right_secondary = self._tuned_team_bg_color(sport, right_tri, right_secondary, secondary=True)
-        if sport == "MLB":
-            left_alt = self._mix_color(left_alt, "#cfd9e8", 0.42)
-            right_alt = self._mix_color(right_alt, "#cfd9e8", 0.42)
-            left_text = "#f2f6fc"
-            right_text = "#f2f6fc"
-        else:
-            left_text = self._top_text_color(left_color)
-            right_text = self._top_text_color(right_color)
+        left_text = self._top_text_color(left_color)
+        right_text = self._top_text_color(right_color)
         left_name_text = "#f7f7f7" if left_tri == "SAS" else left_text
         right_name_text = "#f7f7f7" if right_tri == "SAS" else right_text
         left_record_color = "#f7f7f7" if left_tri == "SAS" else self._with_alpha(left_text, 0.85)
@@ -3823,12 +3757,9 @@ class ScoreSourceWindow(QMainWindow):
             pix = self._load_logo_pixmap(data, box.width())
             if pix:
                 box.set_logo(pix)
-                self._set_background_logo(side, pix)
                 if side == "home":
                     self.setWindowIcon(QIcon(pix))
                 return
-        if self.sport_name.upper() != "MLB":
-            self._set_background_logo(side, None)
         # Keep current logo/icon on transient fetch failures to avoid flicker.
 
     def _apply_combo_logo_bytes(self, key: tuple[str, str, str], data: bytes | None) -> None:
@@ -3888,8 +3819,6 @@ class ScoreSourceWindow(QMainWindow):
         self.home_record.setText("--")
         self.away_logo_box.set_logo(None)
         self.home_logo_box.set_logo(None)
-        self._set_background_logo("away", None)
-        self._set_background_logo("home", None)
         self.apply_team_logo_style(self.away_logo_box, "AWY", ACCENT, ACCENT_SOFT)
         self.apply_team_logo_style(self.home_logo_box, "HME", ACCENT_SOFT, ACCENT)
         self._set_top_background(ACCENT, ACCENT_SOFT, ACCENT_SOFT, ACCENT)
@@ -4558,12 +4487,6 @@ class ScoreSourceWindow(QMainWindow):
         elif home_bonus:
             bonus_text = f"BONUS {home_tri}"
         self._set_label_text(self.bottom_center_label, bonus_text or " ", animate=True)
-        if sport == "MLB":
-            neutral = "#dde7f5"
-            self.bottom_center_label.setStyleSheet(f"color: {self._with_alpha(neutral, 0.78)}; font-weight: 800; font-size: 14px;")
-            self.bottom_left_label.setStyleSheet(f"color: {self._with_alpha(neutral, 0.9)}; font-weight: bold; font-size: 14px;")
-            self.bottom_right_label.setStyleSheet(f"color: {self._with_alpha(neutral, 0.9)}; font-weight: bold; font-size: 14px;")
-            return
         # apply alt accent to labels
         self.bottom_left_label.setStyleSheet(f"color: {self._team_alt_color(away_tri)}; font-weight: bold; font-size: 14px;")
         self.bottom_right_label.setStyleSheet(f"color: {self._team_alt_color(home_tri)}; font-weight: bold; font-size: 14px;")
@@ -5249,11 +5172,9 @@ class ScoreSourceWindow(QMainWindow):
         self._schedule_state_save()
 
     def _team_color(self, tri: str | None) -> str:
-        tri_key = (tri or "").upper()
-        colors = getattr(self.backend, "TEAM_COLORS", getattr(self.backend, "TEAM_PRIMARY_COLORS", {}))
-        if tri_key in colors:
-            return colors[tri_key]
-        return "#3a4f68"
+        return getattr(self.backend, "TEAM_COLORS", getattr(self.backend, "TEAM_PRIMARY_COLORS", {})).get(
+            (tri or "").upper(), ACCENT
+        )
 
     def _display_tricode(self, team: Dict[str, Any], fallback: str = "") -> str:
         tri = (team.get("teamTricode") or team.get("tricode") or fallback or "").upper()
@@ -5262,11 +5183,10 @@ class ScoreSourceWindow(QMainWindow):
         return tri[:3]
 
     def _team_secondary_color(self, tri: str | None) -> str:
-        tri_key = (tri or "").upper()
-        secondary = getattr(self.backend, "TEAM_SECONDARY_COLORS", {}).get(tri_key)
+        secondary = getattr(self.backend, "TEAM_SECONDARY_COLORS", {}).get((tri or "").upper())
         if secondary:
             return secondary
-        return self._mix_color(self._team_color(tri_key), TEAM_BG_BASE, 0.28)
+        return self._mix_color(self._team_color(tri), BG, 0.35)
 
     def _team_alt_color(self, tri: str | None) -> str:
         tri_key = (tri or "").upper()
@@ -5274,55 +5194,7 @@ class ScoreSourceWindow(QMainWindow):
         if alt:
             return alt
         accents = getattr(self.backend, "TEAM_ACCENT_COLORS", {})
-        if tri_key in accents:
-            return accents[tri_key]
-        return self._mix_color(self._team_color(tri), "#d4deee", 0.36)
-
-    @staticmethod
-    def _hex_to_rgb(color_hex: str) -> tuple[int, int, int]:
-        h = (color_hex or "").lstrip("#")
-        if len(h) != 6:
-            return (0, 0, 0)
-        try:
-            return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-        except Exception:
-            return (0, 0, 0)
-
-    def _color_luminance(self, color_hex: str) -> float:
-        r, g, b = self._hex_to_rgb(color_hex)
-
-        def _channel(v: int) -> float:
-            srgb = v / 255.0
-            if srgb <= 0.03928:
-                return srgb / 12.92
-            return ((srgb + 0.055) / 1.055) ** 2.4
-
-        return 0.2126 * _channel(r) + 0.7152 * _channel(g) + 0.0722 * _channel(b)
-
-    def _color_distance(self, a_hex: str, b_hex: str) -> float:
-        ar, ag, ab = self._hex_to_rgb(a_hex)
-        br, bg, bb = self._hex_to_rgb(b_hex)
-        dr, dg, db = ar - br, ag - bg, ab - bb
-        return (dr * dr + dg * dg + db * db) ** 0.5
-
-    def _tuned_team_bg_color(self, sport: str, tri: str | None, color: str, *, secondary: bool = False) -> str:
-        tri_key = (tri or "").upper()
-        tuned = str(color or "#3a4f68")
-        override = SPORT_TEAM_BG_OVERRIDES.get(sport, {}).get(tri_key)
-        if override:
-            tuned = self._mix_color(tuned, override, 0.55)
-        blend = float(SPORT_BG_BLEND_FACTORS.get(sport, 0.24))
-        if secondary:
-            blend = min(0.44, blend + 0.06)
-        tuned = self._mix_color(tuned, TEAM_BG_BASE, blend)
-        lum = self._color_luminance(tuned)
-        if lum < 0.16:
-            tuned = self._mix_color(tuned, "#90a8c9", 0.62)
-        elif lum > 0.62:
-            tuned = self._mix_color(tuned, "#26364b", 0.45)
-        if self._color_distance(tuned, BG) < 70:
-            tuned = self._mix_color(tuned, "#7f99bb", 0.60)
-        return tuned
+        return accents.get(tri_key, self._team_color(tri))
 
     def _extract_clock_text(self, raw: Any) -> str:
         if not raw:
@@ -5901,49 +5773,11 @@ class ScoreSourceWindow(QMainWindow):
                 return i
         return None
 
-    def _update_bg_logo_geometry(self) -> None:
-        away_label = getattr(self, "away_bg_logo", None)
-        home_label = getattr(self, "home_bg_logo", None)
-        if away_label is not None and getattr(self, "left_bg", None) is not None:
-            margin_x = 26
-            margin_top = CONTROL_BAR_HEIGHT + 6
-            margin_bottom = 8
-            right_cut = (CENTER_PANEL_WIDTH // 2) + 10
-            width = max(1, self.left_bg.width() - margin_x - right_cut)
-            height = max(1, self.left_bg.height() - margin_top - margin_bottom)
-            away_label.setGeometry(margin_x, margin_top, width, height)
-        if home_label is not None and getattr(self, "right_bg", None) is not None:
-            margin_x = 26
-            margin_top = CONTROL_BAR_HEIGHT + 6
-            margin_bottom = 8
-            left_cut = (CENTER_PANEL_WIDTH // 2) + 10
-            width = max(1, self.right_bg.width() - margin_x - left_cut)
-            height = max(1, self.right_bg.height() - margin_top - margin_bottom)
-            home_label.setGeometry(left_cut, margin_top, width, height)
-
-    def _set_background_logo(self, side: str, pixmap: QPixmap | None) -> None:
-        label = self.away_bg_logo if side == "away" else self.home_bg_logo
-        effect = self.away_bg_logo_effect if side == "away" else self.home_bg_logo_effect
-        if label is None or effect is None:
-            return
-        if self.sport_name.upper() != "MLB" or pixmap is None or pixmap.isNull():
-            label.clear()
-            effect.setOpacity(0.0)
-            return
-        self._update_bg_logo_geometry()
-        target_w = max(1, int(label.width() * 0.78))
-        target_h = max(1, int(label.height() * 0.78))
-        scaled = pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        label.setPixmap(scaled)
-        effect.setOpacity(MLB_BG_LOGO_OPACITY)
-        label.lower()
-
     def _set_top_background(
         self, away_primary: str, away_secondary: str, home_primary: str, home_secondary: str
     ) -> None:
         if getattr(self, "left_bg", None) is None or getattr(self, "right_bg", None) is None:
             return
-        self._update_bg_logo_geometry()
         away_mid = self._mix_color(away_primary, away_secondary, 0.55)
         home_mid = self._mix_color(home_primary, home_secondary, 0.55)
         away_blend = self._mix_color(away_secondary, "#000000", 0.65)
@@ -6146,16 +5980,9 @@ class ScoreSourceWindow(QMainWindow):
         card.setStyleSheet("background: transparent; border: none;")
 
     def _set_table_color(self, frame: QFrame, table: QTableWidget, color: str):
-        if self.sport_name.upper() == "MLB":
-            frame_bg = self._mix_color(color, PANEL, 0.09)
-            header_bg = self._mix_color(color, BG, 0.14)
-            alt_row_bg = self._mix_color(color, BG, 0.16)
-            row_line = "rgba(255,255,255,0.06)"
-        else:
-            frame_bg = self._mix_color(color, PANEL, 0.14)
-            header_bg = self._mix_color(color, BG, 0.20)
-            alt_row_bg = self._mix_color(color, BG, 0.24)
-            row_line = "rgba(255,255,255,0.07)"
+        frame_bg = self._mix_color(color, PANEL, 0.18)
+        header_bg = self._mix_color(color, BG, 0.25)
+        row_line = "rgba(255,255,255,0.08)"
         frame.setStyleSheet(
             f"""
             QFrame {{
@@ -6171,7 +5998,7 @@ class ScoreSourceWindow(QMainWindow):
                 background-color: {frame_bg};
                 color: {TEXT};
                 border: none;
-                alternate-background-color: {alt_row_bg};
+                alternate-background-color: {self._mix_color(color, BG, 0.28)};
             }}
             QHeaderView::section {{
                 background-color: {header_bg};
