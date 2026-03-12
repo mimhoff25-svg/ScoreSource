@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Callable
 
-from PySide6.QtCore import Qt, QTimer, Signal, QRectF, QPoint, QRect, QSize, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QRectF, QPoint, QRect, QSize, QPropertyAnimation, QEasingCurve, QEvent, QPointF
 from PySide6.QtGui import (
     QPalette,
     QColor,
@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QActionGroup,
     QFont,
     QFontMetrics,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -423,6 +424,162 @@ class PlayerRowDelegate(QStyledItemDelegate):
         painter.restore()
 
 
+class _BasesDiamondWidget(QWidget):
+    """Baseball bases diamond — clean broadcast TV style (ESPN/Fox corner graphic)."""
+
+    _EMPTY    = QColor( 45,  50,  60)   # dark unfilled base
+    _EMPTY_BD = QColor(120, 125, 135)   # border for empty base
+    _OCCUPIED = QColor(255, 200,   0)   # bright yellow — runner on base
+    _OCC_BD   = QColor(255, 230, 100)   # lighter border when occupied
+    _PATH     = QColor(100, 105, 115)   # thin baseline connectors
+    _LIGHT_OFF = QColor(62, 68, 78)
+    _BALL_ON = QColor(255, 200, 0)
+    _STRIKE_ON = QColor(110, 200, 255)
+    _OUT_ON = QColor(235, 90, 90)
+    _LABEL = QColor(168, 180, 198)
+
+    def __init__(self):
+        super().__init__()
+        self._first  = False
+        self._second = False
+        self._third  = False
+        self._balls = 0
+        self._strikes = 0
+        self._outs = 0
+
+    def set_bases(self, first: bool = False, second: bool = False, third: bool = False) -> None:
+        self._first  = first
+        self._second = second
+        self._third  = third
+        self.update()
+
+    @staticmethod
+    def _clamp_count(value: Any, max_value: int) -> int:
+        try:
+            if value in (None, ""):
+                return 0
+            parsed = int(value)
+        except Exception:
+            return 0
+        return max(0, min(int(max_value), parsed))
+
+    def set_count(self, balls: Any = None, strikes: Any = None, outs: Any = None) -> None:
+        self._balls = self._clamp_count(balls, 3)
+        self._strikes = self._clamp_count(strikes, 2)
+        self._outs = self._clamp_count(outs, 2)
+        self.update()
+
+    def sizeHint(self):
+        return QSize(CENTER_PANEL_WIDTH, 110)
+
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Center of the diamond, shifted slightly up so it feels balanced
+        cx = w // 2
+        cy = h // 2 - int(h * 0.05)
+
+        # Distance from center to each base
+        r = int(min(w, h) * 0.36)
+
+        home   = QPointF(cx,     cy + r)
+        first  = QPointF(cx + r, cy)
+        second = QPointF(cx,     cy - r)
+        third  = QPointF(cx - r, cy)
+
+        # ── Basepath lines ───────────────────────────────────────────────
+        p.setPen(QPen(self._PATH, 1.5))
+        for a, b in [(home, first), (first, second), (second, third), (third, home)]:
+            p.drawLine(a, b)
+
+        # ── Base squares (rotated 45° — broadcast standard) ─────────────
+        bs = max(7, r // 5)
+
+        def draw_base(pos: QPointF, occupied: bool) -> None:
+            p.save()
+            p.translate(pos)
+            p.rotate(45)
+            if occupied:
+                p.setBrush(QBrush(self._OCCUPIED))
+                p.setPen(QPen(self._OCC_BD, 1.5))
+            else:
+                p.setBrush(QBrush(self._EMPTY))
+                p.setPen(QPen(self._EMPTY_BD, 1.5))
+            p.drawRect(QRectF(-bs, -bs, bs * 2, bs * 2))
+            p.restore()
+
+        # Draw order: back to front
+        draw_base(second, self._second)
+        draw_base(third,  self._third)
+        draw_base(first,  self._first)
+
+        # ── Home plate — five-sided like the real thing ──────────────────
+        hp = max(7, r // 5)
+        hp_pts = QPolygonF([
+            QPointF(home.x() - hp,  home.y() - hp * 0.55),
+            QPointF(home.x() - hp,  home.y() + hp * 0.15),
+            QPointF(home.x(),        home.y() + hp * 0.70),
+            QPointF(home.x() + hp,  home.y() + hp * 0.15),
+            QPointF(home.x() + hp,  home.y() - hp * 0.55),
+        ])
+        p.setBrush(QBrush(self._EMPTY))
+        p.setPen(QPen(self._EMPTY_BD, 1.5))
+        p.drawPolygon(hp_pts)
+
+        # ── TV-style count lights near the bottom of the diamond ──────────
+        dot_r = max(3, bs // 2)
+        dot_gap = max(3, dot_r - 1)
+        group_gap = max(8, dot_r * 2 + 2)
+        label_gap = max(4, dot_r)
+        # Anchor lights just below home plate so they sit under the diamond.
+        y = min(h - dot_r - 2, int(home.y() + hp + dot_r + 6))
+
+        groups = [
+            ("B", 3, self._balls, self._BALL_ON),
+            ("S", 2, self._strikes, self._STRIKE_ON),
+            ("O", 2, self._outs, self._OUT_ON),
+        ]
+
+        label_font = QFont(p.font())
+        label_font.setBold(True)
+        label_font.setPointSize(max(8, dot_r + 2))
+        p.setFont(label_font)
+        label_fm = QFontMetrics(label_font)
+
+        total_width = 0
+        for label, total, _, _ in groups:
+            dots_width = (total * (dot_r * 2)) + ((total - 1) * dot_gap) if total > 0 else 0
+            label_width = label_fm.horizontalAdvance(label)
+            total_width += label_width + label_gap + dots_width
+        total_width += group_gap * (len(groups) - 1)
+        x = cx - (total_width / 2.0)
+
+        for idx, (label, total, active, on_color) in enumerate(groups):
+            label_width = label_fm.horizontalAdvance(label)
+            dots_width = (total * (dot_r * 2)) + ((total - 1) * dot_gap)
+            group_width = label_width + label_gap + dots_width
+
+            label_rect = QRectF(x, y - dot_r - 2, label_width, (dot_r * 2) + 4)
+            p.setPen(QPen(self._LABEL, 1))
+            p.drawText(label_rect, Qt.AlignVCenter | Qt.AlignLeft, label)
+
+            dots_start = x + label_width + label_gap
+            for dot in range(total):
+                center_x = dots_start + dot_r + dot * ((dot_r * 2) + dot_gap)
+                p.setBrush(QBrush(on_color if dot < active else self._LIGHT_OFF))
+                p.setPen(QPen(QColor(20, 24, 30), 1.0))
+                p.drawEllipse(QPointF(center_x, y), dot_r, dot_r)
+
+            x += group_width
+            if idx < len(groups) - 1:
+                sep_x = x + (group_gap / 2.0)
+                p.setPen(QPen(self._LABEL, 1))
+                p.drawLine(QPointF(sep_x, y - dot_r - 1), QPointF(sep_x, y + dot_r + 1))
+                x += group_gap
+
+
 class TickerLabel(QLabel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -731,11 +888,31 @@ class CenterPanel(QFrame):
         self.league_badge_logo.setFixedSize(40, 40)
         self.league_badge_logo.setAlignment(Qt.AlignCenter)
         self.league_badge_logo.setStyleSheet("background: transparent;")
+        self.pitch_left_indicator = QLabel()
+        self.pitch_left_indicator.setFixedSize(14, 14)
+        self.pitch_left_indicator.setAlignment(Qt.AlignCenter)
+        self.pitch_left_indicator.setStyleSheet("background: transparent;")
         self.period_label = QLabel("Q-")
         self.period_label.setAlignment(Qt.AlignCenter)
         self.period_label.setStyleSheet("color: #e6edf7; font-weight: 700; font-size: 14px;")
+        self.pitch_right_indicator = QLabel()
+        self.pitch_right_indicator.setFixedSize(14, 14)
+        self.pitch_right_indicator.setAlignment(Qt.AlignCenter)
+        self.pitch_right_indicator.setStyleSheet("background: transparent;")
+        self._pitch_ball_pixmap = self._build_pitch_ball_pixmap(14)
+        self._pitch_blank_pixmap = QPixmap(14, 14)
+        self._pitch_blank_pixmap.fill(Qt.transparent)
+        period_row = QHBoxLayout()
+        period_row.setContentsMargins(0, 0, 0, 0)
+        period_row.setSpacing(6)
+        period_row.addStretch(1)
+        period_row.addWidget(self.pitch_left_indicator)
+        period_row.addWidget(self.period_label)
+        period_row.addWidget(self.pitch_right_indicator)
+        period_row.addStretch(1)
         badge_layout.addWidget(self.league_badge_logo, alignment=Qt.AlignHCenter)
-        badge_layout.addWidget(self.period_label, alignment=Qt.AlignHCenter)
+        badge_layout.addLayout(period_row)
+        self.set_pitching_side(None)
 
         self.clock_frame = QFrame()
         self.clock_frame.setFrameShape(QFrame.StyledPanel)
@@ -777,8 +954,14 @@ class CenterPanel(QFrame):
         self.bottom_row.addWidget(self.bottom_center, stretch=1)
         self.bottom_row.addWidget(self.bottom_right, stretch=1)
 
+        self.diamond_widget = _BasesDiamondWidget()
+        self.diamond_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.diamond_widget.setMinimumHeight(80)
+        self.diamond_widget.setVisible(False)
+
         layout.addWidget(self.period_badge)
         layout.addWidget(self.clock_frame)
+        layout.addWidget(self.diamond_widget)
         layout.addLayout(self.bottom_row)
 
     def set_state(
@@ -814,6 +997,24 @@ class CenterPanel(QFrame):
         self.league_badge_logo.clear()
         self.league_badge_logo.setVisible(False)
 
+    @staticmethod
+    def _build_pitch_ball_pixmap(size: int) -> QPixmap:
+        size = max(10, int(size))
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(1, 1, size - 2, size - 2)
+        p.setBrush(QBrush(QColor(245, 247, 250)))
+        p.setPen(QPen(QColor(188, 196, 207), 1.2))
+        p.drawEllipse(rect)
+        seam_rect = rect.adjusted(size * 0.12, size * 0.06, -size * 0.12, -size * 0.06)
+        p.setPen(QPen(QColor(200, 90, 90), 1.0))
+        p.drawArc(seam_rect, 36 * 16, 112 * 16)
+        p.drawArc(seam_rect, 216 * 16, 112 * 16)
+        p.end()
+        return pix
+
     def _update_clock_display_size(self, digit_count: int) -> None:
         digit_count = max(1, int(digit_count))
         if self._clock_digit_count != digit_count:
@@ -827,6 +1028,27 @@ class CenterPanel(QFrame):
         if width > max_width:
             width = max_width
         self.clock_display.setFixedSize(width, height)
+
+    def show_diamond(self, show: bool) -> None:
+        """Toggle between the LCD clock and the bases diamond (MLB mode)."""
+        self.clock_frame.setVisible(not show)
+        self.diamond_widget.setVisible(show)
+
+    def set_bases(self, first: bool = False, second: bool = False, third: bool = False) -> None:
+        """Update which bases are occupied on the diamond."""
+        self.diamond_widget.set_bases(first, second, third)
+
+    def set_count(self, balls: Any = None, strikes: Any = None, outs: Any = None) -> None:
+        """Update TV-style B/S/O indicator lights on the diamond."""
+        self.diamond_widget.set_count(balls, strikes, outs)
+
+    def set_pitching_side(self, side: str | None) -> None:
+        """Set pitcher marker next to inning: left (away) or right (home)."""
+        normalized = str(side or "").strip().lower()
+        left_on = normalized == "left"
+        right_on = normalized == "right"
+        self.pitch_left_indicator.setPixmap(self._pitch_ball_pixmap if left_on else self._pitch_blank_pixmap)
+        self.pitch_right_indicator.setPixmap(self._pitch_ball_pixmap if right_on else self._pitch_blank_pixmap)
 
 
 class ScoreSourceWindow(QMainWindow):
@@ -875,6 +1097,7 @@ class ScoreSourceWindow(QMainWindow):
         self._pending_selection_id: str | None = None
         self._table_headers = self._resolve_headers(getattr(self.backend, "sport_table_headers", None))
         self.display_delay_ms = 200  # minimal delay to show scores quickly
+
         delay_sec = os.environ.get("SCORESOURCE_FEED_DELAY_SEC", "0")
         try:
             self.feed_delay_ms = max(0, int(float(delay_sec)) * 1000)
@@ -883,6 +1106,19 @@ class ScoreSourceWindow(QMainWindow):
         self._delay_is_default = "SCORESOURCE_FEED_DELAY_SEC" not in os.environ
         if self._delay_is_default and self.sport_name.upper() != "NBA":
             self.feed_delay_ms = 0
+        try:
+            self.boxscore_poll_default_ms = max(
+                1000, int(float(os.environ.get("SCORESOURCE_BOXSCORE_POLL_MS", "2000")))
+            )
+        except Exception:
+            self.boxscore_poll_default_ms = 2000
+        try:
+            self.boxscore_poll_live_ms = max(
+                self.boxscore_poll_default_ms,
+                int(float(os.environ.get("SCORESOURCE_BOXSCORE_POLL_LIVE_MS", "3000"))),
+            )
+        except Exception:
+            self.boxscore_poll_live_ms = max(self.boxscore_poll_default_ms, 3000)
         try:
             self.ticker_speed_px = max(
                 TICKER_SPEED_PX,
@@ -937,7 +1173,16 @@ class ScoreSourceWindow(QMainWindow):
         self._shortcut_down = QShortcut(Qt.Key_Down, self)
         self._shortcut_down.activated.connect(lambda: self._step_game_selection(1))
 
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        try:
+            data_workers = max(2, min(12, int(os.environ.get("SCORESOURCE_DATA_WORKERS", "4"))))
+        except Exception:
+            data_workers = 4
+        try:
+            logo_workers = max(1, min(8, int(os.environ.get("SCORESOURCE_LOGO_WORKERS", "2"))))
+        except Exception:
+            logo_workers = 2
+        self._executor = ThreadPoolExecutor(max_workers=data_workers)
+        self._logo_executor = ThreadPoolExecutor(max_workers=logo_workers)
         self._scores_future = None
         self._scores_future_sport = None
         self._boxscore_future = None
@@ -949,9 +1194,26 @@ class ScoreSourceWindow(QMainWindow):
         self._score_history: deque[tuple[float, Dict[str, Any]]] = deque(maxlen=120)
         self._boxscore_history: Dict[str, deque[tuple[float, Dict[str, Any]]]] = {}
         self._pbp_history: Dict[str, deque[tuple[float, list[dict[str, Any]]]]] = {}
-        self._last_logo_keys: Dict[str, tuple[str, str]] = {"home": ("", ""), "away": ("", "")}
-        self._combo_logo_cache: Dict[tuple[str, str], QPixmap] = {}
-        self._combo_logo_pending: set[tuple[str, str]] = set()
+        self._runtime_scores_cache: Dict[str, Dict[str, Any]] = {}
+        self._runtime_boxscore_cache: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._boxscore_prefetch_inflight: set[tuple[str, str]] = set()
+        self._score_prefetch_inflight: set[str] = set()
+        self._last_cross_sport_prefetch_ts = 0.0
+        self._cross_sport_prefetch_interval_sec = 20.0
+        try:
+            self._cross_sport_prefetch_batch = max(
+                1, min(6, int(os.environ.get("SCORESOURCE_CROSS_SPORT_PREFETCH_BATCH", "2")))
+            )
+        except Exception:
+            self._cross_sport_prefetch_batch = 2
+        try:
+            self._prefetch_game_limit = max(0, min(6, int(os.environ.get("SCORESOURCE_PREFETCH_GAME_COUNT", "3"))))
+        except Exception:
+            self._prefetch_game_limit = 3
+        self._displayed_boxscore_key: tuple[str, str] | None = None
+        self._last_logo_keys: Dict[str, tuple[str, str, str]] = {"home": ("", "", ""), "away": ("", "", "")}
+        self._combo_logo_cache: Dict[tuple[str, str, str], QPixmap] = {}
+        self._combo_logo_pending: set[tuple[str, str, str]] = set()
         self._combo_game_row_by_id: Dict[str, int] = {}
         self._pbp_future = None
         self._pbp_future_game_id: str | None = None
@@ -1321,10 +1583,10 @@ class ScoreSourceWindow(QMainWindow):
         bottom_layout.setContentsMargins(BOTTOM_H_MARGIN, BOTTOM_V_MARGIN, BOTTOM_H_MARGIN, BOTTOM_V_MARGIN)
         bottom_layout.setSpacing(BOTTOM_SECTION_SPACING)
 
-        tables_frame = QFrame()
-        tables_frame.setFixedHeight(TABLES_HEIGHT)
-        tables_frame.setStyleSheet("background: transparent;")
-        tables_layout = QHBoxLayout(tables_frame)
+        self.tables_frame = QFrame()
+        self.tables_frame.setFixedHeight(TABLES_HEIGHT)
+        self.tables_frame.setStyleSheet("background: transparent;")
+        tables_layout = QHBoxLayout(self.tables_frame)
         tables_layout.setContentsMargins(0, 0, 0, 0)
         tables_layout.setSpacing(TABLE_GAP)
 
@@ -1344,7 +1606,7 @@ class ScoreSourceWindow(QMainWindow):
         self.home_table_frame.setFixedSize(table_width, TABLES_HEIGHT)
         tables_layout.addWidget(self.away_table_frame)
         tables_layout.addWidget(self.home_table_frame)
-        bottom_layout.addWidget(tables_frame)
+        bottom_layout.addWidget(self.tables_frame)
 
         self.pbp_bar = QFrame()
         self.pbp_bar.setFrameShape(QFrame.StyledPanel)
@@ -1502,6 +1764,7 @@ class ScoreSourceWindow(QMainWindow):
 
     def update_table_headers(self, headers: list[str] | None = None) -> None:
         resolved = self._resolve_headers(headers)
+        self._update_mlb_diamond_visibility()
         if getattr(self, "_table_headers", None) == resolved:
             return
         self._table_headers = resolved
@@ -1514,6 +1777,11 @@ class ScoreSourceWindow(QMainWindow):
             if self.sport_name.upper() == "NBA":
                 self._configure_nba_table(table)
             table.setRowCount(0)
+
+    def _update_mlb_diamond_visibility(self) -> None:
+        """Show the bases diamond in the center panel for MLB; clock for all other sports."""
+        is_mlb = self.sport_name.upper() == "MLB"
+        self.center_panel.show_diamond(is_mlb)
 
     def update_league_logo(self, logo_path: str | None) -> None:
         self._sport_logo_path = logo_path
@@ -1539,7 +1807,7 @@ class ScoreSourceWindow(QMainWindow):
         table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setFocusPolicy(Qt.ClickFocus)
         table.setShowGrid(False)
         table.horizontalScrollBar().setSingleStep(60)
@@ -1547,6 +1815,73 @@ class ScoreSourceWindow(QMainWindow):
         if table not in self._nba_scroll_tables:
             table.installEventFilter(self)
             self._nba_scroll_tables.add(table)
+            table.cellClicked.connect(lambda row, col, t=table: self._on_nba_player_cell_clicked(t, row, col))
+
+    def _on_nba_player_cell_clicked(self, table: QTableWidget, row: int, col: int):
+        # Only respond to clicks on the Player column (usually col 1)
+        if col != 1:
+            return
+        player_name_item = table.item(row, 1)
+        if not player_name_item:
+            return
+        player_name = player_name_item.text()
+        # Try to get player ID from hidden data or fallback to name lookup
+        player_id = None
+        for c in range(table.columnCount()):
+            item = table.item(row, c)
+            if item and hasattr(item, 'data'):
+                val = item.data(Qt.UserRole)
+                if val and str(val).isdigit():
+                    player_id = str(val)
+                    break
+        # Fallback: try to match by name in boxscore data
+        boxscore = getattr(self, '_last_boxscore_data', None)
+        player_data = None
+        if boxscore:
+            for side in ("home", "away"):
+                team = boxscore.get(side, {})
+                for p in team.get("players", []):
+                    if (p.get("fullName") or p.get("displayName") or p.get("name") or "").strip() == player_name.strip():
+                        player_data = p
+                        player_id = p.get("personId") or p.get("id") or p.get("playerId")
+                        break
+                if player_data:
+                    break
+        # Fetch player card info from backend if possible
+        card_info = None
+        if player_id:
+            try:
+                import scoresource.nba as nba_backend
+                card_info = nba_backend._nba._fetch_player_card(str(player_id)) if hasattr(nba_backend._nba, '_fetch_player_card') else None
+            except Exception:
+                card_info = None
+        # Compose popup message
+        lines = []
+        if card_info:
+            lines.append(f"Name: {card_info.get('displayName') or card_info.get('fullName') or player_name}")
+            if card_info.get('position'):
+                lines.append(f"Position: {card_info['position']}")
+            if card_info.get('height'):
+                lines.append(f"Height: {card_info['height']}")
+            if card_info.get('weight'):
+                lines.append(f"Weight: {card_info['weight']} lbs")
+            if card_info.get('birthdate'):
+                lines.append(f"Birthdate: {card_info['birthdate']}")
+            if card_info.get('college'):
+                lines.append(f"College: {card_info['college']}")
+            if card_info.get('country'):
+                lines.append(f"Country: {card_info['country']}")
+        else:
+            lines.append(f"Name: {player_name}")
+        # Always show row stats as well
+        lines.append("\nStats:")
+        for c in range(table.columnCount()):
+            header = table.horizontalHeaderItem(c).text()
+            value = table.item(row, c).text() if table.item(row, c) else ""
+            lines.append(f"{header}: {value}")
+        msg = "\n".join(lines)
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(table, f"Player Card: {player_name}", msg)
 
     # --------------- timers ---------------
     def _setup_timers(self):
@@ -1556,7 +1891,7 @@ class ScoreSourceWindow(QMainWindow):
 
         self.boxscore_timer = QTimer(self)
         self.boxscore_timer.timeout.connect(self.refresh_boxscore)
-        self.boxscore_timer.start(1_000)
+        self._update_boxscore_poll_timer(restart=True)
 
         self.clock_tick_timer = QTimer(self)
         self.clock_tick_timer.timeout.connect(self._tick_clock)
@@ -1607,6 +1942,47 @@ class ScoreSourceWindow(QMainWindow):
             except Exception:
                 act.setChecked(False)
 
+    def _selected_game_live(self) -> bool:
+        game_id = str(self.selected_game_id or self._pending_selection_id or "")
+        if not game_id:
+            return False
+        for game in self.games:
+            if str(game.get("gameId") or "") != game_id:
+                continue
+            status = str(game.get("status") or "").lower().strip()
+            if status in {"live", "inprogress", "in progress", "ongoing"}:
+                return True
+            if status in {"upcoming", "scheduled", "pre", "final", "post"}:
+                return False
+            status_val = game.get("gameStatus") or game.get("status")
+            if isinstance(status_val, int):
+                return status_val == 2
+            status_text = str(game.get("gameStatusText") or game.get("statusText") or "").lower()
+            if any(token in status_text for token in ("final", "scheduled", "pregame", "pre-game", "tba", "starts")):
+                return False
+            return bool(re.search(r"\bq[1-4]\b|\bot\b|\blive\b", status_text))
+        return False
+
+    def _boxscore_poll_interval_ms(self) -> int:
+        sport = self.sport_name.upper()
+        if sport != "NBA":
+            return self.boxscore_poll_default_ms
+        if self.feed_delay_ms <= 0 and self._selected_game_live():
+            # In live mode realtime already streams clocks/scores, so poll boxscore less frequently.
+            return self.boxscore_poll_live_ms
+        return self.boxscore_poll_default_ms
+
+    def _update_boxscore_poll_timer(self, *, restart: bool = False) -> None:
+        timer = getattr(self, "boxscore_timer", None)
+        if timer is None:
+            return
+        interval_ms = self._boxscore_poll_interval_ms()
+        if timer.interval() != interval_ms:
+            timer.setInterval(interval_ms)
+            restart = True
+        if restart or not timer.isActive():
+            timer.start(interval_ms)
+
     def _apply_default_delay_for_sport(self) -> None:
         if not getattr(self, "_delay_is_default", False):
             return
@@ -1616,6 +1992,7 @@ class ScoreSourceWindow(QMainWindow):
             self.feed_delay_ms = desired_ms
             self._sync_delay_actions()
             self._clock_state = None
+            self._update_boxscore_poll_timer(restart=True)
 
     def _sync_ticker_speed_actions(self):
         current_speed = float(getattr(self, "ticker_speed_px", TICKER_SPEED_PX))
@@ -1686,6 +2063,7 @@ class ScoreSourceWindow(QMainWindow):
                 pass
         if prev_delay > 0 and self.feed_delay_ms <= 0 and self.selected_game_id:
             self._start_realtime_for_game(self.selected_game_id)
+        self._update_boxscore_poll_timer(restart=True)
         self._next_display_at = None
         self.refresh_scores()
         self.refresh_boxscore()
@@ -1700,10 +2078,180 @@ class ScoreSourceWindow(QMainWindow):
             pass
 
     # --------------- data refresh ---------------
+    def _cache_runtime_scores(
+        self,
+        sport_name: str,
+        games: List[Dict[str, Any]],
+        lines: List[str] | None = None,
+        *,
+        selected_game_id: str | None = None,
+    ) -> None:
+        if not sport_name:
+            return
+        self._runtime_scores_cache[sport_name] = {
+            "games": games or [],
+            "lines": lines or [],
+            "selected_game_id": selected_game_id if selected_game_id is not None else self.selected_game_id,
+            "ts": time.monotonic(),
+        }
+
+    def _runtime_scores_snapshot(self, sport_name: str) -> Dict[str, Any] | None:
+        snapshot = self._runtime_scores_cache.get(sport_name)
+        if not isinstance(snapshot, dict):
+            return None
+        games = snapshot.get("games") or []
+        if not isinstance(games, list) or not games:
+            return None
+        selected_game_id = snapshot.get("selected_game_id")
+        if selected_game_id:
+            self._pending_selection_id = str(selected_game_id)
+        return {
+            "games": games,
+            "lines": snapshot.get("lines") or [],
+            "_sport_name": sport_name,
+            "_sport_token": self._sport_token,
+        }
+
+    def _cache_runtime_boxscore(self, sport_name: str, game_id: str | None, data: Dict[str, Any] | None) -> None:
+        if not sport_name or not game_id or not isinstance(data, dict):
+            return
+        key = (sport_name, str(game_id))
+        payload = dict(data)
+        payload.pop("_sport_name", None)
+        payload.pop("_sport_token", None)
+        self._runtime_boxscore_cache[key] = payload
+        if len(self._runtime_boxscore_cache) > 320:
+            for stale_key in list(self._runtime_boxscore_cache.keys())[:80]:
+                if stale_key != key:
+                    self._runtime_boxscore_cache.pop(stale_key, None)
+
+    def _runtime_boxscore(self, sport_name: str, game_id: str | None) -> Dict[str, Any] | None:
+        if not sport_name or not game_id:
+            return None
+        cached = self._runtime_boxscore_cache.get((sport_name, str(game_id)))
+        return cached if isinstance(cached, dict) else None
+
+    def _prioritized_prefetch_game_ids(self, games: List[Dict[str, Any]]) -> List[str]:
+        current_game_id = str(self.selected_game_id or "")
+        current_idx = -1
+        for idx, game in enumerate(games):
+            if str(game.get("gameId") or "") == current_game_id:
+                current_idx = idx
+                break
+
+        ranked: list[tuple[tuple[int, int, int], str]] = []
+        for idx, game in enumerate(games):
+            game_id = str(game.get("gameId") or "")
+            if not game_id or game_id == current_game_id:
+                continue
+            status_raw = game.get("status")
+            if status_raw is None:
+                status_raw = game.get("gameStatus")
+            status_text = game.get("gameStatusText") or game.get("statusText") or game.get("header")
+            normalized = self._normalize_status(status_raw, status_text)
+            is_live = normalized in {"live", "in", "inprogress", "in progress", "ongoing"}
+            distance = abs(idx - current_idx) if current_idx >= 0 else idx
+            ranked.append(((0 if is_live else 1, distance, idx), game_id))
+        ranked.sort(key=lambda item: item[0])
+        return [game_id for _, game_id in ranked]
+
+    def _prefetch_boxscores_for_games(self, games: List[Dict[str, Any]]) -> None:
+        limit = int(getattr(self, "_prefetch_game_limit", 0) or 0)
+        if limit <= 0:
+            return
+        sport_name = self.sport_name
+        queued = 0
+        for game_id in self._prioritized_prefetch_game_ids(games):
+            if queued >= limit:
+                break
+            key = (sport_name, game_id)
+            if key in self._runtime_boxscore_cache or key in self._boxscore_prefetch_inflight:
+                continue
+            try:
+                if self.logic is not None:
+                    future = self._executor.submit(self.logic.get_boxscore, game_id)
+                else:
+                    future = self._executor.submit(self.backend.fetch_boxscore, game_id)
+            except Exception:
+                continue
+            self._boxscore_prefetch_inflight.add(key)
+            future.add_done_callback(
+                lambda fut, k=key, gid=game_id, s=sport_name: self._on_prefetch_boxscore_ready(fut, k, gid, s)
+            )
+            queued += 1
+
+    def _on_prefetch_boxscore_ready(self, future, key: tuple[str, str], game_id: str, sport_name: str) -> None:
+        self._boxscore_prefetch_inflight.discard(key)
+        if not self._alive:
+            return
+        try:
+            data = future.result()
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        self._cache_runtime_boxscore(sport_name, game_id, data)
+        if sport_name != self.sport_name:
+            return
+        tagged = dict(data)
+        tagged["_sport_name"] = sport_name
+        tagged["_sport_token"] = self._sport_token
+        self._append_boxscore_history(game_id, tagged)
+
+    def _prefetch_other_sports_scoreboards(self) -> None:
+        if self.logic is None:
+            return
+        now = time.monotonic()
+        if now - self._last_cross_sport_prefetch_ts < self._cross_sport_prefetch_interval_sec:
+            return
+        self._last_cross_sport_prefetch_ts = now
+        queued = 0
+        for sport_name in self._sport_options:
+            if sport_name == self.sport_name:
+                continue
+            if sport_name in self._score_prefetch_inflight:
+                continue
+            cached = self._runtime_scores_cache.get(sport_name) or {}
+            cached_ts = cached.get("ts")
+            if isinstance(cached_ts, (int, float)) and now - cached_ts < 30.0:
+                continue
+            try:
+                future = self._executor.submit(self.logic.fetch_scores, sport_name)
+            except Exception:
+                continue
+            self._score_prefetch_inflight.add(sport_name)
+            future.add_done_callback(lambda fut, s=sport_name: self._on_prefetch_scores_ready(fut, s))
+            queued += 1
+            if queued >= self._cross_sport_prefetch_batch:
+                break
+
+    def _on_prefetch_scores_ready(self, future, sport_name: str) -> None:
+        self._score_prefetch_inflight.discard(sport_name)
+        if not self._alive:
+            return
+        try:
+            data = future.result()
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        games = data.get("games") or []
+        if not isinstance(games, list):
+            return
+        selected = None
+        cached = self._runtime_scores_cache.get(sport_name)
+        if isinstance(cached, dict):
+            selected = cached.get("selected_game_id")
+        self._cache_runtime_scores(sport_name, games, data.get("lines") or [], selected_game_id=selected)
+
     def refresh_scores(self):
         self.update_table_headers(getattr(self.backend, "sport_table_headers", None))
         self._apply_default_delay_for_sport()
         if self.sport_name != self._sport_token_name:
+            previous_sport = self._sport_token_name
+            self._cache_runtime_scores(previous_sport, self.games, self.lines, selected_game_id=self.selected_game_id)
+            if self.selected_game_id and isinstance(self._last_boxscore_data, dict):
+                self._cache_runtime_boxscore(previous_sport, str(self.selected_game_id), self._last_boxscore_data)
             self._sport_token += 1
             self._sport_token_name = self.sport_name
             self._has_displayed_scores = False
@@ -1714,6 +2262,14 @@ class ScoreSourceWindow(QMainWindow):
             self._pbp_history.clear()
             self._pbp_lines = []
             self._last_pbp_key = None
+            self._displayed_boxscore_key = None
+            self._clock_state = None
+            self.clock_feed_interval_avg = None
+            self._last_cross_sport_prefetch_ts = 0.0
+        if not self._has_displayed_scores:
+            runtime_scores = self._runtime_scores_snapshot(self.sport_name)
+            if runtime_scores:
+                self._emit_scores_if_current(runtime_scores)
         if self._scores_future and not self._scores_future.done() and self._scores_future_sport == self.sport_name:
             return
         sport_name = self.sport_name
@@ -1734,6 +2290,7 @@ class ScoreSourceWindow(QMainWindow):
             return
         data["_sport_name"] = sport_name
         data["_sport_token"] = sport_token
+        self._cache_runtime_scores(sport_name, data.get("games") or [], data.get("lines") or [])
         self._append_score_history(data)
         self.scores_fetched.emit(data)
 
@@ -1813,21 +2370,38 @@ class ScoreSourceWindow(QMainWindow):
     def _start_boxscore_prefetch(self, game_id: str):
         if self._boxscore_future and not self._boxscore_future.done():
             return
+        sport_name = self.sport_name
+        sport_token = self._sport_token
         if self.logic is not None:
             self._boxscore_future = self._executor.submit(self.logic.get_boxscore, game_id)
         else:
             self._boxscore_future = self._executor.submit(self.backend.fetch_boxscore, game_id)
-        self._boxscore_future.add_done_callback(lambda fut, gid=game_id: self._on_boxscore_ready(gid, fut))
+        self._boxscore_future.add_done_callback(
+            lambda fut, gid=game_id, s=sport_name, t=sport_token: self._on_boxscore_ready(gid, fut, s, t)
+        )
 
     def _start_realtime_for_game(self, game_id: str):
         if not self.logic:
             return
         if self.feed_delay_ms > 0:
+            try:
+                self.logic.stop_realtime()
+            except Exception:
+                pass
+            self._update_boxscore_poll_timer()
+            return
+        if not self._selected_game_live():
+            try:
+                self.logic.stop_realtime()
+            except Exception:
+                pass
+            self._update_boxscore_poll_timer()
             return
         try:
             self.logic.start_realtime(game_id, self._on_realtime_update)
         except Exception:
             pass
+        self._update_boxscore_poll_timer()
 
     def _apply_scores(self, data: Dict[str, Any]):
         self.games = data.get("games", []) or []
@@ -1849,6 +2423,8 @@ class ScoreSourceWindow(QMainWindow):
                 away_score = int(away_team.get("score") or 0)
                 home_score = int(home_team.get("score") or 0)
                 status_text = g.get("gameStatusText", "Scheduled")
+                if self.sport_name.upper() == "MLB":
+                    status_text = self._mlb_arrow_status_text(status_text)
                 status_state = (g.get("status") or "").lower()
                 if status_state not in ("live", "upcoming", "final"):
                     lowered = str(status_text or "").lower()
@@ -1932,6 +2508,9 @@ class ScoreSourceWindow(QMainWindow):
         # keep previous selection if still present, otherwise pick first
         target_id, idx = self._preferred_game_id(self.games)
         self.selected_game_id = target_id
+        self._cache_runtime_scores(self.sport_name, self.games, self.lines, selected_game_id=self.selected_game_id)
+        self._prefetch_boxscores_for_games(self.games)
+        self._prefetch_other_sports_scoreboards()
 
         self.game_combo.blockSignals(True)
         self._show_placeholder()
@@ -1939,6 +2518,8 @@ class ScoreSourceWindow(QMainWindow):
         self._pending_selection_id = None
         if self.selected_game_id:
             self._start_realtime_for_game(self.selected_game_id)
+        else:
+            self._update_boxscore_poll_timer()
         self.refresh_boxscore()
         self.refresh_pbp()
 
@@ -1947,6 +2528,15 @@ class ScoreSourceWindow(QMainWindow):
         if not game_id:
             return
         key = (self.sport_name, str(game_id))
+        if self._displayed_boxscore_key != key:
+            self._clock_state = None
+            self.clock_feed_interval_avg = None
+            cached_runtime = self._runtime_boxscore(*key)
+            if isinstance(cached_runtime, dict):
+                try:
+                    self.apply_boxscore(cached_runtime)
+                except Exception:
+                    pass
         if self._boxscore_future and not self._boxscore_future.done() and self._boxscore_future_key == key:
             return
         sport_name = self.sport_name
@@ -2043,6 +2633,7 @@ class ScoreSourceWindow(QMainWindow):
             data = self._build_boxscore_stub(game_id)
         data["_sport_name"] = sport_name
         data["_sport_token"] = sport_token
+        self._cache_runtime_boxscore(sport_name, str(game_id), data)
         self._append_boxscore_history(game_id, data)
         if game_id not in (self.selected_game_id, self._pending_selection_id):
             return
@@ -2206,11 +2797,16 @@ class ScoreSourceWindow(QMainWindow):
         game = data["game"]
         home = data["home"]
         away = data["away"]
+        current_game_id = str(self.selected_game_id or self._pending_selection_id or "")
+        if current_game_id:
+            self._displayed_boxscore_key = (self.sport_name, current_game_id)
+            self._cache_runtime_boxscore(self.sport_name, current_game_id, data)
         self._has_displayed_boxscore = True
         self._last_boxscore_data = data
 
         # quarter + clock
         self._apply_clock(data)
+        self.center_panel.set_pitching_side(None)
 
         # Default: away on left, home on right
         left_team = away
@@ -2221,6 +2817,29 @@ class ScoreSourceWindow(QMainWindow):
             left_fouls = "BONUS" if self._team_in_bonus(left_team) else self._team_fouls_text(left_team)
             right_fouls = "BONUS" if self._team_in_bonus(right_team) else self._team_fouls_text(right_team)
             self.center_panel.set_bottom_labels(str(left_fouls), str(right_fouls), "FOULS")
+        elif self.sport_name.upper() == "MLB":
+            situation = game.get("situation") or {}
+            on1 = bool(situation.get("onFirst"))
+            on2 = bool(situation.get("onSecond"))
+            on3 = bool(situation.get("onThird"))
+            self.center_panel.set_bases(on1, on2, on3)
+            balls = situation.get("balls")
+            strikes = situation.get("strikes")
+            outs = situation.get("outs")
+            self.center_panel.set_count(balls, strikes, outs)
+            half = str(situation.get("inningHalf") or "").strip().upper()
+            pitching_side: str | None = None
+            if half.startswith("TOP") or half == "T" or half.startswith("▲"):
+                pitching_side = "right"  # home team fields in top half
+            elif half.startswith("BOT") or half.startswith("BOTTOM") or half == "B" or half.startswith("▼"):
+                pitching_side = "left"   # away team fields in bottom half
+            self.center_panel.set_pitching_side(pitching_side)
+            count_text = ""
+            if on1 and on2 and on3:
+                count_text = "BASES LOADED"
+            batter = situation.get("batter") or ""
+            pitcher = situation.get("pitcher") or ""
+            self.center_panel.set_bottom_labels(batter, pitcher, count_text)
         elif self.sport_name.upper() == "NHL":
             is_shootout = (
                 self.center_panel.period_label.text().upper() == "SO"
@@ -3027,16 +3646,21 @@ class ScoreSourceWindow(QMainWindow):
         game = next((g for g in self.games if str(g.get("gameId")) == str(game_id)), None)
         if not game:
             return
+        if str(self.selected_game_id or "") != str(game.get("gameId") or ""):
+            self._clock_state = None
+            self.clock_feed_interval_avg = None
         self.selected_game_id = game.get("gameId")
         self._pending_selection_id = None
         self._instant_boxscore_apply = True
         if self.selected_game_id:
             self._start_realtime_for_game(self.selected_game_id)
-            cached = None
-            history = self._boxscore_history.get(str(self.selected_game_id))
-            if history:
-                cached = history[-1][1]
-            else:
+            self._cache_runtime_scores(self.sport_name, self.games, self.lines, selected_game_id=self.selected_game_id)
+            cached = self._runtime_boxscore(self.sport_name, str(self.selected_game_id))
+            if cached is None:
+                history = self._boxscore_history.get(str(self.selected_game_id))
+                if history:
+                    cached = history[-1][1]
+            if cached is None:
                 cached = self._build_boxscore_stub(self.selected_game_id)
             if isinstance(cached, dict):
                 try:
@@ -3057,39 +3681,41 @@ class ScoreSourceWindow(QMainWindow):
         logo_token = logo_url or tri
 
         if not (team_id or logo_token):
-            self._last_logo_keys[side] = ("", "")
+            self._last_logo_keys[side] = ("", "", "")
             box.set_logo(None)
             if side == "home":
                 self.setWindowIcon(self._default_icon)
             return
 
-        key = (str(team_id or ""), logo_token)
+        key = self._scoped_logo_key(team_id, logo_token)
         if self._last_logo_keys.get(side) == key:
             return
-        box.set_logo(None)
         self._last_logo_keys[side] = key
 
-        future = self._executor.submit(self.backend.load_logo, team_id, logo_token)
+        future = self._logo_executor.submit(self.backend.load_logo, team_id, logo_token)
         future.add_done_callback(lambda fut, s=side, k=key: self._on_logo_ready(s, k, fut))
 
-    def _team_logo_key(self, team: Dict[str, Any]) -> tuple[str, str] | None:
+    def _scoped_logo_key(self, team_id: Any, logo_token: Any) -> tuple[str, str, str]:
+        return (self.sport_name.upper(), str(team_id or ""), str(logo_token or ""))
+
+    def _team_logo_key(self, team: Dict[str, Any]) -> tuple[str, str, str] | None:
         team_id = team.get("teamId") or team.get("id")
         tri = (team.get("teamTricode") or team.get("tricode") or "").upper()
         logo_url = self._team_logo_url(team) if self.sport_name.upper() == "NBA" else None
         logo_token = logo_url or tri
         if not (team_id or logo_token):
             return None
-        return (str(team_id or ""), str(logo_token))
+        return self._scoped_logo_key(team_id, logo_token)
 
-    def _queue_combo_logo(self, key: tuple[str, str]) -> None:
+    def _queue_combo_logo(self, key: tuple[str, str, str]) -> None:
         if key in self._combo_logo_cache or key in self._combo_logo_pending:
             return
-        if not hasattr(self, "_executor") or self._executor is None:
+        if not hasattr(self, "_logo_executor") or self._logo_executor is None:
             return
         self._combo_logo_pending.add(key)
-        team_id = key[0] or None
-        logo_token = key[1] or ""
-        future = self._executor.submit(self.backend.load_logo, team_id, logo_token)
+        team_id = key[1] or None
+        logo_token = key[2] or ""
+        future = self._logo_executor.submit(self.backend.load_logo, team_id, logo_token)
         future.add_done_callback(lambda fut, k=key: self._on_combo_logo_ready(k, fut))
 
     def _team_logo_url(self, team: Dict[str, Any]) -> str | None:
@@ -3105,7 +3731,7 @@ class ScoreSourceWindow(QMainWindow):
                 return url
         return None
 
-    def _on_logo_ready(self, side: str, key: tuple[str, str], future):
+    def _on_logo_ready(self, side: str, key: tuple[str, str, str], future):
         if not self._alive:
             return
         try:
@@ -3116,7 +3742,7 @@ class ScoreSourceWindow(QMainWindow):
             return
         self.logo_ready.emit(side, data)
 
-    def _on_combo_logo_ready(self, key: tuple[str, str], future):
+    def _on_combo_logo_ready(self, key: tuple[str, str, str], future):
         if not self._alive:
             return
         try:
@@ -3134,11 +3760,9 @@ class ScoreSourceWindow(QMainWindow):
                 if side == "home":
                     self.setWindowIcon(QIcon(pix))
                 return
-        box.set_logo(None)
-        if side == "home":
-            self.setWindowIcon(self._default_icon)
+        # Keep current logo/icon on transient fetch failures to avoid flicker.
 
-    def _apply_combo_logo_bytes(self, key: tuple[str, str], data: bytes | None) -> None:
+    def _apply_combo_logo_bytes(self, key: tuple[str, str, str], data: bytes | None) -> None:
         self._combo_logo_pending.discard(key)
         if not data:
             return
@@ -3240,6 +3864,7 @@ class ScoreSourceWindow(QMainWindow):
         self.home_table.setRowCount(0)
         self.setWindowIcon(self._default_icon)
         self._pending_selection_id = None
+        self._displayed_boxscore_key = None
         self._next_display_at = None
         self.lines = []
         self.games = []
@@ -3276,6 +3901,7 @@ class ScoreSourceWindow(QMainWindow):
                 self.logic.stop_realtime()
         except Exception:
             pass
+        self._update_boxscore_poll_timer()
 
     def closeEvent(self, event):
         self._alive = False
@@ -3286,6 +3912,8 @@ class ScoreSourceWindow(QMainWindow):
         except Exception:
             pass
         self._executor.shutdown(wait=False)
+        if getattr(self, "_logo_executor", None) is not None:
+            self._logo_executor.shutdown(wait=False)
         super().closeEvent(event)
 
     def _remaining_delay_ms(self) -> int:
@@ -3304,6 +3932,7 @@ class ScoreSourceWindow(QMainWindow):
         force_live: bool = False,
         buffer_sec: float | None = None,
         stale_window_sec: float | None = None,
+        source: str = "boxscore",
     ) -> tuple[str, str, Dict[str, Any]]:
         """
         Normalize incoming clock + shot clock into display text and tick state.
@@ -3349,7 +3978,8 @@ class ScoreSourceWindow(QMainWindow):
                 stale_window = stale_window_default
                 if feed_interval_avg is not None:
                     stale_window = max(stale_window, min(60.0, feed_interval_avg * 1.5))
-                if now - last_feed_ts <= stale_window:
+                synthetic_window = min(stale_window, 2.0 if sport == "NBA" else 4.0)
+                if prev.get("raw_running") and (now - last_feed_ts) <= synthetic_window:
                     clock_running = True
 
         clock_secs = None
@@ -3366,9 +3996,8 @@ class ScoreSourceWindow(QMainWindow):
                     raw_jump = True
                 if not raw_jump and clock_secs > (prev_clock_secs + 0.05):
                     if sport == "NBA":
-                        # Trust NBA feed corrections when the raw clock changes.
-                        if prev_raw is not None and raw_secs is not None and raw_secs == prev_raw:
-                            clock_secs = prev_clock_secs
+                        # Prevent same-period clock regressions caused by stale/out-of-order packets.
+                        clock_secs = prev_clock_secs
                     elif sport == "NHL":
                         clock_secs = prev_clock_secs
                     else:
@@ -3389,11 +4018,25 @@ class ScoreSourceWindow(QMainWindow):
             "last_ts": now,
             "last_feed_ts": last_feed_ts,
             "feed_interval_avg": feed_interval_avg,
+            "source": source,
         }
         self.clock_feed_interval_avg = feed_interval_avg
         return clock_text, shot_text, state
 
     def _apply_clock(self, data: Dict[str, Any]):
+        sport = self.sport_name.upper()
+        # Avoid live NBA clock oscillation from racing boxscore vs realtime updates.
+        if sport == "NBA" and self.feed_delay_ms <= 0 and self._selected_game_live():
+            prev = self._clock_state or {}
+            prev_source = prev.get("source")
+            prev_feed_ts = prev.get("last_feed_ts") or prev.get("last_ts")
+            if prev_source == "realtime" and prev_feed_ts:
+                try:
+                    if (time.monotonic() - float(prev_feed_ts)) <= 4.0:
+                        return
+                except Exception:
+                    pass
+
         game = data.get("game") or {}
         shot_val = data.get("shotclock")
         period_text = self._format_period_badge({**game, "_header": data.get("header")})
@@ -3401,7 +4044,6 @@ class ScoreSourceWindow(QMainWindow):
         if not raw_clock:
             raw_clock = self._extract_clock_text(game.get("gameStatusText") or data.get("header"))
         raw_secs = self._clock_to_seconds(raw_clock)
-        sport = self.sport_name.upper()
         force_live, buffer_sec, stale_window_sec = self._clock_sync_settings(sport, period_text, data.get("header"))
         fallback_clock = self._extract_clock_text(raw_clock)
         if raw_secs is None and force_live:
@@ -3417,6 +4059,7 @@ class ScoreSourceWindow(QMainWindow):
             force_live=force_live,
             buffer_sec=buffer_sec,
             stale_window_sec=stale_window_sec,
+            source="boxscore",
         )
         if sport == "NHL":
             clock_text = self._clean_nhl_clock_text(clock_text)
@@ -3498,6 +4141,8 @@ class ScoreSourceWindow(QMainWindow):
         period_upper = (period_text or "").upper()
         if period_upper in ("FINAL", "HALF TIME", "INTERMISSION", "Q-", "P-"):
             return False
+        if period_upper.startswith("INTERMISSION"):
+            return False
         if period_upper.startswith("END OF"):
             return False
         return self._is_live_clock(period_text, header)
@@ -3575,12 +4220,28 @@ class ScoreSourceWindow(QMainWindow):
             return header.strip()
         return ""
 
+    @staticmethod
+    def _mlb_arrow_status_text(text: Any) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        if raw.startswith(("▲", "▼")):
+            return raw
+        if raw.startswith(("↑", "↓")):
+            return raw.replace("↑", "▲", 1).replace("↓", "▼", 1)
+        if re.match(r"^(top|t)\b", raw, re.IGNORECASE):
+            return re.sub(r"^(top|t)\b\.?\s*", "▲ ", raw, flags=re.IGNORECASE)
+        if re.match(r"^(bottom|bot|b)\b", raw, re.IGNORECASE):
+            return re.sub(r"^(bottom|bot|b)\b\.?\s*", "▼ ", raw, flags=re.IGNORECASE)
+        return raw
+
     def _format_period_badge(self, game: Dict[str, Any]) -> str:
         status_val = game.get("status") or game.get("gameStatus")
         raw_status = str(game.get("gameStatusText") or game.get("statusText") or game.get("_header") or "")
         raw_clock = str(game.get("gameClockText") or game.get("gameClock") or "")
         status_text = raw_status.lower()
         clock_text = raw_clock.lower()
+        sport = self.sport_name.upper()
         if (
             "halftime" in status_text
             or "half time" in status_text
@@ -3589,12 +4250,16 @@ class ScoreSourceWindow(QMainWindow):
         ):
             return "HALF TIME"
         if isinstance(status_val, int) and status_val >= 3:
+            if sport == "NBA":
+                return "FINAL"
             if not self._has_live_game():
                 time_label = self._game_start_time_label(game)
                 if time_label:
                     return time_label
             return "FINAL"
         if any(k in status_text for k in ("final", "endgame", "ended")):
+            if sport == "NBA":
+                return "FINAL"
             if not self._has_live_game():
                 time_label = self._game_start_time_label(game)
                 if time_label:
@@ -3606,7 +4271,6 @@ class ScoreSourceWindow(QMainWindow):
             current_period = period_field.get("current")
         elif isinstance(period_field, int):
             current_period = period_field
-        sport = self.sport_name.upper()
         if not isinstance(current_period, int):
             time_label = raw_status.strip()
             if time_label and time_label.upper() not in ("SCHEDULED", "TBA"):
@@ -3664,6 +4328,13 @@ class ScoreSourceWindow(QMainWindow):
             if current_period > 4:
                 return f"OT {current_period - 3}"
             return "P-"
+        if sport == "MLB":
+            # For live games use ESPN inning text, but render half-inning with arrows.
+            if raw_status.strip():
+                return self._mlb_arrow_status_text(raw_status)
+            if isinstance(current_period, int):
+                return f"Inn {current_period}"
+            return "MLB"
         mapping = {1: "1ST", 2: "2ND", 3: "3RD", 4: "4TH"}
         return mapping.get(current_period, f"OT{current_period - 4}" if current_period > 4 else f"Q{current_period}")
 
@@ -3837,12 +4508,30 @@ class ScoreSourceWindow(QMainWindow):
         effect.setOpacity(0.0)
         prev = self._fade_anims.pop(widget, None)
         if prev:
-            prev.stop()
+            try:
+                prev.stop()
+            except RuntimeError:
+                pass
+            try:
+                prev.deleteLater()
+            except RuntimeError:
+                pass
         anim = QPropertyAnimation(effect, b"opacity", widget)
         anim.setDuration(duration_ms)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def _clear_fade_anim() -> None:
+            current = self._fade_anims.get(widget)
+            if current is anim:
+                self._fade_anims.pop(widget, None)
+            try:
+                anim.deleteLater()
+            except RuntimeError:
+                pass
+
+        anim.finished.connect(_clear_fade_anim)
         self._fade_anims[widget] = anim
         return anim
 
@@ -3863,7 +4552,10 @@ class ScoreSourceWindow(QMainWindow):
             anim = self._begin_fade(target, duration_ms=duration_ms)
         label.setText(text)
         if anim:
-            anim.start(QAbstractAnimation.DeleteWhenStopped)
+            try:
+                anim.start()
+            except RuntimeError:
+                pass
 
     def _score_style(self, color: str) -> str:
         return f"font-size: 58px; font-weight: 900; color: {color};"
@@ -4220,7 +4912,10 @@ class ScoreSourceWindow(QMainWindow):
             anim = self._begin_fade(label, duration_ms=220)
             label.set_ticker_text(text, speed_px=self._pbp_speed_px(), direction="ltr")
             if anim:
-                anim.start(QAbstractAnimation.DeleteWhenStopped)
+                try:
+                    anim.start()
+                except RuntimeError:
+                    pass
         else:
             label.setText(self._elide_label_text(label, text))
 
@@ -4333,7 +5028,9 @@ class ScoreSourceWindow(QMainWindow):
                 "period": {"current": period},
                 "gameClockText": state.game_clock_text,
                 "gameClock": state.game_clock_raw,
-                "gameStatusText": state.game_clock_text,
+                "gameStatus": 2,
+                "status": "live",
+                "gameStatusText": "Live",
             }
         )
         raw_clock = state.game_clock_raw or state.game_clock_text or ""
@@ -4351,6 +5048,7 @@ class ScoreSourceWindow(QMainWindow):
             force_live=force_live,
             buffer_sec=buffer_sec,
             stale_window_sec=stale_window_sec,
+            source="realtime",
         )
         if sport == "NHL":
             clock_text = self._clean_nhl_clock_text(clock_text)
@@ -4419,8 +5117,10 @@ class ScoreSourceWindow(QMainWindow):
         self.lines = scores.get("lines", []) or []
         self.games = scores.get("games", []) or []
         if scores:
+            self._cache_runtime_scores(self.sport_name, self.games, self.lines, selected_game_id=self.selected_game_id)
             self._apply_scores({"games": self.games, "lines": self.lines})
         if boxscore:
+            self._cache_runtime_boxscore(self.sport_name, self.selected_game_id, boxscore)
             self.apply_boxscore(boxscore)
 
     def _schedule_state_save(self, *, immediate: bool = False) -> None:
