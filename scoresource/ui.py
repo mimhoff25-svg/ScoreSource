@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -57,6 +58,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QMenu,
     QStackedLayout,
+    QDialog,
+    QScrollArea,
 )
 
 PLAYER_DIVIDER_ROLE = Qt.UserRole + 1
@@ -65,6 +68,7 @@ GAME_LOGO_AWAY_ROLE = Qt.UserRole + 10
 GAME_LOGO_HOME_ROLE = Qt.UserRole + 11
 GAME_LOGO_AWAY_KEY_ROLE = Qt.UserRole + 12
 GAME_LOGO_HOME_KEY_ROLE = Qt.UserRole + 13
+PLAYER_CONTEXT_ROLE = Qt.UserRole + 20
 GAME_LOGO_SIZE = 36
 
 from . import nba as default_backend
@@ -139,6 +143,10 @@ LOGO_Y_OFFSET_OVERRIDES = {
 }
 LOGO_SHADOW_OVERRIDES = {
     "TOR": {"dx": 0, "dy": 2, "alpha": 130},
+}
+MLB_BG_COLOR_OVERRIDES = {
+    # Keep Pirates side darker so the mark doesn't fight the yellow-heavy panel tint.
+    "PIT": ("#141922", "#2a303b"),
 }
 CENTER_SEAM_WIDTH = 220
 TOP_H_MARGIN = 24
@@ -1051,6 +1059,587 @@ class CenterPanel(QFrame):
         self.pitch_right_indicator.setPixmap(self._pitch_ball_pixmap if right_on else self._pitch_blank_pixmap)
 
 
+class PlayerCardDialog(QDialog):
+    STAT_MAX = 16
+    HERO_HEADSHOT_SIZE = 96
+    HERO_TEAM_LOGO_SIZE = 54
+    PROFILE_COLUMNS = 2
+    GAME_STATS_COLUMNS = 2
+    CAREER_STATS_COLUMNS = 4
+
+    def __init__(self, context: Dict[str, Any], parent: QWidget | None = None):
+        super().__init__(parent)
+        self._context = dict(context or {})
+        accent = str(self._context.get("teamColor") or ACCENT)
+        self.setWindowTitle("Player Card")
+        self.setModal(False)
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setWindowFlag(Qt.Tool, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setFixedSize(560, 336)
+        self.setStyleSheet(self._build_style(accent))
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        hero = QFrame()
+        hero.setObjectName("hero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(10, 8, 10, 8)
+        hero_layout.setSpacing(0)
+
+        self.headshot_label = QLabel()
+        self.headshot_label.setObjectName("headshot")
+        self.headshot_label.setFixedSize(self.HERO_HEADSHOT_SIZE, self.HERO_HEADSHOT_SIZE)
+        self.headshot_label.setAlignment(Qt.AlignCenter)
+        self._headshot_loaded = False
+
+        self.team_logo_label = QLabel()
+        self.team_logo_label.setObjectName("teamLogo")
+        self.team_logo_label.setFixedSize(self.HERO_TEAM_LOGO_SIZE, self.HERO_TEAM_LOGO_SIZE)
+        self.team_logo_label.setAlignment(Qt.AlignCenter)
+
+        self.name_label = QLabel(self._context.get("playerName") or "Player")
+        self.name_label.setObjectName("playerName")
+        self.meta_label = QLabel("")
+        self.meta_label.setObjectName("playerMeta")
+
+        close_button = QToolButton()
+        close_button.setObjectName("cardClose")
+        close_button.setText("x")
+        close_button.setAutoRaise(True)
+        close_button.clicked.connect(self.close)
+
+        hero_top = QHBoxLayout()
+        hero_top.setContentsMargins(0, 0, 0, 0)
+        hero_top.setSpacing(10)
+        hero_top.addWidget(self.headshot_label, 0, Qt.AlignTop)
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(1)
+        text_col.addWidget(self.name_label)
+        text_col.addWidget(self.meta_label)
+        text_col.addStretch(1)
+        hero_top.addLayout(text_col, 1)
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(4)
+        right_col.addWidget(close_button, 0, Qt.AlignTop | Qt.AlignRight)
+        right_col.addWidget(self.team_logo_label, 0, Qt.AlignRight | Qt.AlignVCenter)
+        right_col.addStretch(1)
+        hero_top.addLayout(right_col, 0)
+        hero_layout.addLayout(hero_top)
+        root.addWidget(hero)
+
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setObjectName("cardScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.NoFrame)
+        root.addWidget(self.content_scroll, 1)
+
+        body = QWidget()
+        self.content_scroll.setWidget(body)
+        body_layout = QGridLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setHorizontalSpacing(6)
+        body_layout.setVerticalSpacing(6)
+        body_layout.setColumnStretch(0, 1)
+        body_layout.setColumnStretch(1, 1)
+
+        bio_frame = QFrame()
+        bio_frame.setObjectName("cardSection")
+        bio_wrap = QVBoxLayout(bio_frame)
+        bio_wrap.setContentsMargins(8, 6, 8, 6)
+        bio_wrap.setSpacing(4)
+        bio_title = QLabel("Profile")
+        bio_title.setObjectName("sectionTitle")
+        bio_wrap.addWidget(bio_title)
+        self.bio_grid = QGridLayout()
+        self.bio_grid.setHorizontalSpacing(5)
+        self.bio_grid.setVerticalSpacing(5)
+        bio_wrap.addLayout(self.bio_grid)
+        body_layout.addWidget(bio_frame, 0, 0)
+
+        stat_frame = QFrame()
+        stat_frame.setObjectName("cardSection")
+        stat_layout = QVBoxLayout(stat_frame)
+        stat_layout.setContentsMargins(8, 6, 8, 6)
+        stat_layout.setSpacing(4)
+        stat_title = QLabel("Game Stats")
+        stat_title.setObjectName("sectionTitle")
+        stat_layout.addWidget(stat_title)
+        self.stat_grid = QGridLayout()
+        self.stat_grid.setHorizontalSpacing(5)
+        self.stat_grid.setVerticalSpacing(5)
+        stat_layout.addLayout(self.stat_grid)
+        body_layout.addWidget(stat_frame, 0, 1)
+
+        career_frame = QFrame()
+        career_frame.setObjectName("cardSection")
+        career_layout = QVBoxLayout(career_frame)
+        career_layout.setContentsMargins(8, 6, 8, 6)
+        career_layout.setSpacing(4)
+        career_title = QLabel("Career Stats")
+        career_title.setObjectName("sectionTitle")
+        career_layout.addWidget(career_title)
+        self.career_grid = QGridLayout()
+        self.career_grid.setHorizontalSpacing(5)
+        self.career_grid.setVerticalSpacing(5)
+        career_layout.addLayout(self.career_grid)
+        body_layout.addWidget(career_frame, 1, 0, 1, 2)
+        body_layout.setRowStretch(1, 1)
+
+        self._refresh_meta()
+        self.set_headshot(None)
+        self.set_team_logo(None)
+        self._render_bio({})
+        self._render_stats(dict(self._context.get("rowStats") or {}))
+        self._render_career_stats({})
+
+    def _build_style(self, accent: str) -> str:
+        col = QColor(accent)
+        base = QColor(10, 16, 28)
+        deep = QColor(5, 9, 16)
+        hero_bg = QColor(col)
+        hero_bg.setAlpha(44)
+        border = QColor(col)
+        border.setAlpha(160)
+        return f"""
+        QDialog {{
+            background-color: {base.name()};
+            border: 1px solid {border.name(QColor.HexArgb)};
+            border-radius: 12px;
+        }}
+        QFrame#hero {{
+            background-color: {hero_bg.name(QColor.HexArgb)};
+            border: 1px solid {border.name(QColor.HexArgb)};
+            border-radius: 10px;
+        }}
+        QScrollArea#cardScroll {{
+            background: transparent;
+            border: none;
+        }}
+        QFrame#cardSection {{
+            background-color: {deep.name()};
+            border: 1px solid #1b2b40;
+            border-radius: 8px;
+        }}
+        QFrame#dataChip {{
+            background-color: #0d1727;
+            border: 1px solid #24384f;
+            border-radius: 6px;
+        }}
+        QLabel#playerName {{
+            color: #f2f7ff;
+            font-size: 20px;
+            font-weight: 900;
+            letter-spacing: 0.2px;
+        }}
+        QLabel#playerMeta {{
+            color: #cfe2ff;
+            font-size: 10px;
+            font-weight: 600;
+        }}
+        QLabel#playerStatus {{
+            color: #9ec7ec;
+            font-size: 9px;
+            font-weight: 600;
+        }}
+        QLabel#headshot {{
+            background-color: #122034;
+            border: 2px solid #2a4361;
+            border-radius: 48px;
+            color: #dbe9ff;
+            font-size: 28px;
+            font-weight: 900;
+        }}
+        QLabel#teamLogo {{
+            background-color: rgba(8, 15, 27, 0.55);
+            border: 1px solid #2a4361;
+            border-radius: 10px;
+            color: #dbe9ff;
+            font-size: 12px;
+            font-weight: 800;
+            padding: 2px;
+        }}
+        QToolButton#cardClose {{
+            color: #d0e2ff;
+            font-size: 13px;
+            font-weight: 900;
+            border: 1px solid #355173;
+            border-radius: 7px;
+            background: #0f1d30;
+            min-width: 16px;
+            min-height: 16px;
+            max-width: 16px;
+            max-height: 16px;
+        }}
+        QLabel#sectionTitle {{
+            color: #dce9ff;
+            font-size: 11px;
+            font-weight: 800;
+        }}
+        QLabel#fieldKey {{
+            color: #8da5c5;
+            font-size: 8px;
+            font-weight: 700;
+        }}
+        QLabel#fieldVal {{
+            color: #f3f8ff;
+            font-size: 9px;
+            font-weight: 600;
+        }}
+        """
+
+    def _sport_code(self) -> str:
+        return str(self._context.get("sport") or "").strip().upper()
+
+    def _refresh_meta(self) -> None:
+        sport = self._sport_code()
+        jersey = str(self._context.get("jersey") or "").strip()
+        lineup_order = str(self._context.get("lineupOrder") or "").strip()
+        position = str(self._context.get("position") or "").strip()
+        team = str(self._context.get("teamTricode") or self._context.get("teamName") or "").strip()
+        parts = []
+        if sport == "MLB":
+            if jersey:
+                parts.append(f"No. {jersey}")
+            if lineup_order and lineup_order != jersey:
+                parts.append(f"BO {lineup_order}")
+        elif jersey:
+            parts.append(f"#{jersey}")
+        if position:
+            parts.append(position)
+        if team:
+            parts.append(team)
+        if sport and not parts:
+            parts.append(sport)
+        self.meta_label.setText(" · ".join(parts) if parts else "Live game data")
+
+    def _first_text(self, payload: Dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _format_date(self, raw: Any) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return ""
+        for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text, fmt).strftime("%b %d, %Y")
+            except Exception:
+                continue
+        return text
+
+    def _bio_pairs_for_sport(self, payload: Dict[str, Any]) -> List[tuple[str, str]]:
+        sport = self._sport_code()
+        bats = self._first_text(payload, "bats")
+        throws = self._first_text(payload, "throws")
+        shoots = self._first_text(payload, "shootsCatches")
+        bats_throws = ""
+        if bats or throws:
+            bats_throws = f"{bats or '-'} / {throws or '-'}"
+        elif shoots:
+            bats_throws = shoots
+        base = {
+            "No.": self._first_text(payload, "jersey"),
+            "BO": self._first_text(payload, "lineupOrder"),
+            "Pos": self._first_text(payload, "position"),
+            "Team": self._first_text(payload, "team"),
+            "Status": self._first_text(payload, "status"),
+            "Ht": self._first_text(payload, "height"),
+            "Wt": self._first_text(payload, "weight"),
+            "Age": self._first_text(payload, "age"),
+            "DOB": self._format_date(payload.get("dateOfBirth")),
+            "Born": self._first_text(payload, "birthPlace"),
+            "Exp": self._first_text(payload, "experience"),
+            "College": self._first_text(payload, "college"),
+            "B/T": bats_throws,
+            "Shoots": shoots,
+        }
+        order_map = {
+            "NBA": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
+            "NFL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
+            "NCAA FOOTBALL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
+            "NHL": ["No.", "Pos", "Ht", "Wt", "Age", "Shoots", "Born", "Status"],
+            "MLB": ["No.", "Pos", "BO", "B/T", "Ht", "Wt", "Age", "Born", "Status"],
+            "MLS": ["No.", "Pos", "Ht", "Wt", "Age", "Born", "Exp", "Status"],
+        }
+        order = order_map.get(
+            sport,
+            ["No.", "Pos", "Ht", "Wt", "Age", "Born", "Exp", "Status"],
+        )
+        pairs: List[tuple[str, str]] = []
+        used: set[str] = set()
+        for label in order:
+            val = str(base.get(label) or "").strip()
+            if not val:
+                continue
+            pairs.append((label, val))
+            used.add(label)
+        for label in ("Team", "College", "Exp", "Born", "B/T", "Shoots", "Status", "BO", "DOB"):
+            if label in used:
+                continue
+            val = str(base.get(label) or "").strip()
+            if not val:
+                continue
+            pairs.append((label, val))
+            used.add(label)
+        return pairs
+
+    def _render_bio(self, payload: Dict[str, Any]) -> None:
+        merged = dict(payload or {})
+        merged.setdefault(
+            "team",
+            str(self._context.get("teamTricode") or self._context.get("teamName") or "").strip(),
+        )
+        merged.setdefault("jersey", str(self._context.get("jersey") or "").strip())
+        merged.setdefault("lineupOrder", str(self._context.get("lineupOrder") or "").strip())
+        merged.setdefault("position", str(self._context.get("position") or "").strip())
+        pairs = self._bio_pairs_for_sport(merged)
+        self._render_pairs_grid(
+            self.bio_grid,
+            pairs,
+            empty_text="No profile details available yet.",
+            columns=self.PROFILE_COLUMNS,
+        )
+
+    def _normalize_stat_key(self, raw: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(raw or "").lower())
+
+    def _ordered_stats(self, stats: Dict[str, Any]) -> List[tuple[str, str]]:
+        raw_pairs: List[tuple[str, str]] = []
+        for key, raw_val in stats.items():
+            label = str(key or "").strip()
+            if not label:
+                continue
+            value = str(raw_val or "").strip()
+            if not value:
+                continue
+            raw_pairs.append((label, value))
+
+        skip = {
+            self._normalize_stat_key("#"),
+            self._normalize_stat_key("player"),
+            self._normalize_stat_key("pos"),
+            self._normalize_stat_key("position"),
+        }
+        filtered = [(k, v) for k, v in raw_pairs if self._normalize_stat_key(k) not in skip]
+        if not filtered:
+            return []
+
+        sport = self._sport_code()
+        preferred = {
+            "NBA": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO", "+/-"],
+            "NHL": ["G", "A", "PTS", "SOG", "PIM", "SV", "SV%"],
+            "MLB": ["AVG", "OBP", "SLG", "OPS", "HR", "RBI", "R", "H", "AB", "BB", "SO", "SB"],
+            "NFL": ["YDS", "TD", "TKL", "AST", "SACK", "INT", "REC", "CAR"],
+            "NCAA FOOTBALL": ["YDS", "TD", "TKL", "AST", "SACK", "INT", "REC", "CAR"],
+            "MLS": ["G", "A", "SOG", "MIN"],
+        }.get(sport, [])
+
+        by_norm: Dict[str, tuple[str, str]] = {}
+        for pair in filtered:
+            norm = self._normalize_stat_key(pair[0])
+            by_norm.setdefault(norm, pair)
+        ordered: List[tuple[str, str]] = []
+        used: set[str] = set()
+        for label in preferred:
+            norm = self._normalize_stat_key(label)
+            pair = by_norm.get(norm)
+            if pair and norm not in used:
+                ordered.append(pair)
+                used.add(norm)
+        for pair in filtered:
+            norm = self._normalize_stat_key(pair[0])
+            if norm in used:
+                continue
+            ordered.append(pair)
+            used.add(norm)
+        return ordered[: self.STAT_MAX]
+
+    def _render_stats(self, stats: Dict[str, Any]) -> None:
+        filtered = self._ordered_stats(stats)
+        self._render_pairs_grid(
+            self.stat_grid,
+            [(key.upper(), value) for key, value in filtered],
+            empty_text="No game stats available yet.",
+            columns=self.GAME_STATS_COLUMNS,
+        )
+
+    def _ordered_career_stats(self, stats: Dict[str, Any]) -> List[tuple[str, str]]:
+        raw_pairs: List[tuple[str, str]] = []
+        for key, raw_val in stats.items():
+            label = str(key or "").strip()
+            if not label:
+                continue
+            value = str(raw_val or "").strip()
+            if not value:
+                continue
+            raw_pairs.append((label, value))
+        if not raw_pairs:
+            return []
+
+        sport = self._sport_code()
+        preferred = {
+            "NBA": ["GP", "PTS", "REB", "AST", "STL", "BLK", "FG%", "3P%", "FT%"],
+            "NFL": ["GP", "PASS YDS", "PASS TD", "INT", "RUSH YDS", "RUSH TD", "REC", "REC YDS", "REC TD", "TKL", "SACK"],
+            "NCAA FOOTBALL": ["GP", "PASS YDS", "PASS TD", "INT", "RUSH YDS", "RUSH TD", "REC", "REC YDS", "REC TD", "TKL", "SACK"],
+            "MLB": ["GP", "AVG", "HR", "RBI", "H", "OBP", "SLG", "OPS", "SB", "SO", "ERA", "W", "L", "SV"],
+            "NHL": ["GP", "G", "A", "PTS", "+/-", "PIM", "SOG", "SV%", "GAA", "W", "L", "SO", "TOI/G"],
+            "MLS": ["APP", "G", "A", "SOG", "MIN", "YC", "RC", "CS", "SV", "GA"],
+        }.get(sport, [])
+
+        by_norm: Dict[str, tuple[str, str]] = {}
+        for pair in raw_pairs:
+            norm = self._normalize_stat_key(pair[0])
+            by_norm.setdefault(norm, pair)
+        ordered: List[tuple[str, str]] = []
+        used: set[str] = set()
+        for label in preferred:
+            norm = self._normalize_stat_key(label)
+            pair = by_norm.get(norm)
+            if pair and norm not in used:
+                ordered.append(pair)
+                used.add(norm)
+        for pair in raw_pairs:
+            norm = self._normalize_stat_key(pair[0])
+            if norm in used:
+                continue
+            ordered.append(pair)
+            used.add(norm)
+        return ordered[: self.STAT_MAX]
+
+    def _render_career_stats(self, stats: Dict[str, Any]) -> None:
+        filtered = self._ordered_career_stats(stats)
+        self._render_pairs_grid(
+            self.career_grid,
+            [(str(key).upper(), value) for key, value in filtered],
+            empty_text="No career stats available yet.",
+            columns=self.CAREER_STATS_COLUMNS,
+        )
+
+    def _clear_grid(self, layout: QGridLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def apply_profile(self, profile: Dict[str, Any]) -> None:
+        payload = dict(profile or {})
+        resolved_name = (
+            payload.get("displayName")
+            or payload.get("fullName")
+            or self._context.get("playerName")
+            or "Player"
+        )
+        self.name_label.setText(str(resolved_name))
+        if not self._headshot_loaded:
+            self.set_headshot(None)
+
+        if payload.get("jersey"):
+            self._context["jersey"] = str(payload.get("jersey") or "")
+        if payload.get("position"):
+            self._context["position"] = str(payload.get("position") or "")
+        self._refresh_meta()
+        self._render_bio(payload)
+        career_stats = payload.get("careerStats")
+        if isinstance(career_stats, dict):
+            self._render_career_stats(career_stats)
+        else:
+            self._render_career_stats({})
+
+    def _render_pairs_grid(
+        self,
+        layout: QGridLayout,
+        pairs: List[tuple[str, str]],
+        *,
+        empty_text: str,
+        columns: int = 2,
+    ) -> None:
+        self._clear_grid(layout)
+        rows: List[tuple[str, str]] = []
+        for key, value in pairs:
+            label = str(key or "").strip()
+            val = str(value or "").strip()
+            if not label or not val:
+                continue
+            rows.append((label, val))
+
+        if not rows:
+            placeholder = QLabel(empty_text)
+            placeholder.setObjectName("playerStatus")
+            placeholder.setWordWrap(True)
+            layout.addWidget(placeholder, 0, 0, 1, max(1, columns))
+            return
+
+        columns = max(1, int(columns))
+        for idx in range(8):
+            layout.setColumnStretch(idx, 0)
+        for idx in range(columns):
+            layout.setColumnStretch(idx, 1)
+        for idx, (label, val) in enumerate(rows):
+            row = idx // columns
+            col = idx % columns
+            chip = QFrame()
+            chip.setObjectName("dataChip")
+            chip_layout = QVBoxLayout(chip)
+            chip_layout.setContentsMargins(6, 4, 6, 4)
+            chip_layout.setSpacing(1)
+            key_label = QLabel(label)
+            key_label.setObjectName("fieldKey")
+            value_label = QLabel(val)
+            value_label.setObjectName("fieldVal")
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            chip_layout.addWidget(key_label)
+            chip_layout.addWidget(value_label)
+            layout.addWidget(chip, row, col)
+
+    def set_headshot(self, pixmap: QPixmap | None) -> None:
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.headshot_label.size(),
+                Qt.KeepAspectRatioByExpanding,
+                Qt.SmoothTransformation,
+            )
+            self.headshot_label.setPixmap(scaled)
+            self.headshot_label.setText("")
+            self._headshot_loaded = True
+            return
+        self.headshot_label.setPixmap(QPixmap())
+        initials = self._initials(self.name_label.text() or self._context.get("playerName") or "")
+        self.headshot_label.setText(initials or "?")
+        self._headshot_loaded = False
+
+    def set_team_logo(self, pixmap: QPixmap | None) -> None:
+        if pixmap and not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.team_logo_label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self.team_logo_label.setPixmap(scaled)
+            self.team_logo_label.setText("")
+            return
+        self.team_logo_label.setPixmap(QPixmap())
+        fallback = str(self._context.get("teamTricode") or self._context.get("teamName") or "").strip()
+        self.team_logo_label.setText(fallback[:4].upper() if fallback else "")
+
+    def _initials(self, raw_name: Any) -> str:
+        parts = [part for part in str(raw_name or "").strip().split() if part]
+        if not parts:
+            return ""
+        if len(parts) == 1:
+            return parts[0][:2].upper()
+        return (parts[0][0] + parts[-1][0]).upper()
+
+
 class ScoreSourceWindow(QMainWindow):
     scores_ready = Signal(dict)
     boxscore_ready = Signal(dict)
@@ -1060,6 +1649,7 @@ class ScoreSourceWindow(QMainWindow):
     scores_fetched = Signal(dict)  # cross-thread handoff before delay
     boxscore_fetched = Signal(str, object)
     realtime_ready = Signal(object)
+    player_profile_ready = Signal(object, object)
 
     def __init__(
         self,
@@ -1120,6 +1710,26 @@ class ScoreSourceWindow(QMainWindow):
         except Exception:
             self.boxscore_poll_live_ms = max(self.boxscore_poll_default_ms, 3000)
         try:
+            self.scores_poll_live_ms = max(
+                2000, int(float(os.environ.get("SCORESOURCE_SCORES_POLL_LIVE_MS", "5000")))
+            )
+        except Exception:
+            self.scores_poll_live_ms = 5000
+        try:
+            self.scores_poll_upcoming_ms = max(
+                self.scores_poll_live_ms,
+                int(float(os.environ.get("SCORESOURCE_SCORES_POLL_UPCOMING_MS", "15000"))),
+            )
+        except Exception:
+            self.scores_poll_upcoming_ms = max(self.scores_poll_live_ms, 15000)
+        try:
+            self.scores_poll_idle_ms = max(
+                self.scores_poll_upcoming_ms,
+                int(float(os.environ.get("SCORESOURCE_SCORES_POLL_IDLE_MS", "30000"))),
+            )
+        except Exception:
+            self.scores_poll_idle_ms = max(self.scores_poll_upcoming_ms, 30000)
+        try:
             self.ticker_speed_px = max(
                 TICKER_SPEED_PX,
                 float(os.environ.get("SCORESOURCE_TICKER_SPEED_PX", TICKER_SPEED_PX)),
@@ -1146,6 +1756,8 @@ class ScoreSourceWindow(QMainWindow):
         self._rss_fetch_ttl = 180.0
         self._rss_future = None
         self._nba_scroll_tables: set[QTableWidget] = set()
+        self._player_click_tables: set[QTableWidget] = set()
+        self._active_player_card: PlayerCardDialog | None = None
         self._nfl_scroll_views: dict[QWidget, QTableWidget] = {}
         self._nfl_table_team: dict[QTableWidget, Dict[str, Any]] = {}
         self._nfl_table_side: dict[QTableWidget, str] = {}
@@ -1167,6 +1779,7 @@ class ScoreSourceWindow(QMainWindow):
         self.combo_logo_ready.connect(self._apply_combo_logo_bytes)
         self.pbp_ready.connect(self._apply_pbp)
         self.realtime_ready.connect(self._apply_realtime_state)
+        self.player_profile_ready.connect(self._apply_player_profile_ready)
 
         self._shortcut_up = QShortcut(Qt.Key_Up, self)
         self._shortcut_up.activated.connect(lambda: self._step_game_selection(-1))
@@ -1698,6 +2311,7 @@ class ScoreSourceWindow(QMainWindow):
         else:
             QScroller.grabGesture(table.viewport(), QScroller.LeftMouseButtonGesture)
             QScroller.grabGesture(table.viewport(), QScroller.TouchGesture)
+            self._configure_player_table(table)
         if not hasattr(self, "_nfl_scroll_views"):
             self._nfl_scroll_views = {}
         self._nfl_scroll_views[table.viewport()] = table
@@ -1774,6 +2388,7 @@ class ScoreSourceWindow(QMainWindow):
             table.setColumnCount(len(resolved))
             table.setHorizontalHeaderLabels(resolved)
             self._apply_table_column_layout(table)
+            self._configure_player_table(table)
             if self.sport_name.upper() == "NBA":
                 self._configure_nba_table(table)
             table.setRowCount(0)
@@ -1815,79 +2430,291 @@ class ScoreSourceWindow(QMainWindow):
         if table not in self._nba_scroll_tables:
             table.installEventFilter(self)
             self._nba_scroll_tables.add(table)
-            table.cellClicked.connect(lambda row, col, t=table: self._on_nba_player_cell_clicked(t, row, col))
+        self._configure_player_table(table)
 
-    def _on_nba_player_cell_clicked(self, table: QTableWidget, row: int, col: int):
-        # Only respond to clicks on the Player column (usually col 1)
+    def _configure_player_table(self, table: QTableWidget) -> None:
+        if table in self._player_click_tables:
+            return
+        table.cellClicked.connect(lambda row, col, t=table: self._on_player_cell_clicked(t, row, col))
+        self._player_click_tables.add(table)
+
+    def _on_player_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
         if col != 1:
             return
-        player_name_item = table.item(row, 1)
-        if not player_name_item:
+        name_item = table.item(row, 1)
+        if name_item is None:
             return
-        player_name = player_name_item.text()
-        # Try to get player ID from hidden data or fallback to name lookup
-        player_id = None
-        for c in range(table.columnCount()):
-            item = table.item(row, c)
-            if item and hasattr(item, 'data'):
-                val = item.data(Qt.UserRole)
-                if val and str(val).isdigit():
-                    player_id = str(val)
-                    break
-        # Fallback: try to match by name in boxscore data
-        boxscore = getattr(self, '_last_boxscore_data', None)
-        player_data = None
-        if boxscore:
-            for side in ("home", "away"):
-                team = boxscore.get(side, {})
-                for p in team.get("players", []):
-                    if (p.get("fullName") or p.get("displayName") or p.get("name") or "").strip() == player_name.strip():
-                        player_data = p
-                        player_id = p.get("personId") or p.get("id") or p.get("playerId")
-                        break
-                if player_data:
-                    break
-        # Fetch player card info from backend if possible
-        card_info = None
-        if player_id:
+        player_name = str(name_item.text() or "").strip()
+        if player_name.lower() in {"", "no stats available", "lineups tbd"}:
+            return
+
+        context = name_item.data(PLAYER_CONTEXT_ROLE)
+        if not isinstance(context, dict):
+            context = self._fallback_player_context(table, row, player_name)
+        if not context:
+            return
+        context["playerName"] = context.get("playerName") or player_name
+        context["rowStats"] = context.get("rowStats") or self._table_row_stats(table, row)
+        self._open_player_card(context, table=table, row=row)
+
+    def _fallback_player_context(self, table: QTableWidget, row: int, player_name: str) -> Dict[str, Any]:
+        side = "away" if table is getattr(self, "away_table", None) else "home"
+        box = self._last_boxscore_data or {}
+        team = box.get(side) if isinstance(box, dict) else {}
+        if not isinstance(team, dict):
+            team = {}
+        jersey = str(table.item(row, 0).text() if table.item(row, 0) else "")
+        pos = str(table.item(row, 2).text() if table.item(row, 2) else "")
+        matched = self._match_team_player_for_row(team, [jersey, player_name, pos], set())
+        team_tri = str(team.get("teamTricode") or team.get("tricode") or "").upper()
+        team_color = self._team_color(team_tri)
+        context = {
+            "sport": self.sport_name.upper(),
+            "teamId": str(team.get("teamId") or team.get("id") or ""),
+            "teamTricode": team_tri,
+            "teamName": team.get("teamName") or team.get("displayName") or "",
+            "teamColor": team_color,
+            "playerName": player_name,
+            "jersey": jersey,
+            "position": pos,
+        }
+        if isinstance(matched, dict):
+            context["playerId"] = self._player_id_from_entry(matched)
+            context["playerData"] = dict(matched)
+            context["playerName"] = self._player_full_name(matched) or context["playerName"]
+            context["jersey"] = context["jersey"] or self._player_jersey(matched)
+            context["position"] = context["position"] or self._player_position(matched)
+        return context
+
+    def _table_row_stats(self, table: QTableWidget, row: int) -> Dict[str, str]:
+        stats: Dict[str, str] = {}
+        for col in range(table.columnCount()):
+            header_item = table.horizontalHeaderItem(col)
+            key = str(header_item.text() if header_item else f"Stat {col + 1}").strip()
+            if not key:
+                continue
+            cell = table.item(row, col)
+            val = str(cell.text() if cell else "").strip()
+            if col != 1 and not val:
+                continue
+            stats[key] = val
+        return stats
+
+    def _open_player_card(
+        self,
+        context: Dict[str, Any],
+        *,
+        table: QTableWidget | None = None,
+        row: int | None = None,
+    ) -> None:
+        if self._active_player_card is not None:
             try:
-                import scoresource.nba as nba_backend
-                card_info = nba_backend._nba._fetch_player_card(str(player_id)) if hasattr(nba_backend._nba, '_fetch_player_card') else None
+                self._active_player_card.close()
             except Exception:
-                card_info = None
-        # Compose popup message
-        lines = []
-        if card_info:
-            lines.append(f"Name: {card_info.get('displayName') or card_info.get('fullName') or player_name}")
-            if card_info.get('position'):
-                lines.append(f"Position: {card_info['position']}")
-            if card_info.get('height'):
-                lines.append(f"Height: {card_info['height']}")
-            if card_info.get('weight'):
-                lines.append(f"Weight: {card_info['weight']} lbs")
-            if card_info.get('birthdate'):
-                lines.append(f"Birthdate: {card_info['birthdate']}")
-            if card_info.get('college'):
-                lines.append(f"College: {card_info['college']}")
-            if card_info.get('country'):
-                lines.append(f"Country: {card_info['country']}")
-        else:
-            lines.append(f"Name: {player_name}")
-        # Always show row stats as well
-        lines.append("\nStats:")
-        for c in range(table.columnCount()):
-            header = table.horizontalHeaderItem(c).text()
-            value = table.item(row, c).text() if table.item(row, c) else ""
-            lines.append(f"{header}: {value}")
-        msg = "\n".join(lines)
-        from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(table, f"Player Card: {player_name}", msg)
+                pass
+        dialog = PlayerCardDialog(context, self)
+        self._active_player_card = dialog
+        self._position_player_card(dialog, table=table, row=row)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        self._fetch_player_profile_async(dialog, context)
+
+    def _position_player_card(
+        self,
+        dialog: PlayerCardDialog,
+        *,
+        table: QTableWidget | None = None,
+        row: int | None = None,
+    ) -> None:
+        max_width = max(300, self.width() - 12)
+        max_height = max(220, self.height() - 12)
+        width = min(dialog.width(), max_width)
+        height = min(dialog.height(), max_height)
+        dialog.resize(width, height)
+
+        anchor = None
+        if table is not None and isinstance(row, int) and row >= 0:
+            item = table.item(row, 1)
+            if item is not None:
+                item_rect = table.visualItemRect(item)
+                if item_rect.isValid():
+                    anchor = table.viewport().mapToGlobal(item_rect.center())
+        if anchor is None:
+            anchor = self.mapToGlobal(self.rect().center())
+
+        parent_top_left = self.mapToGlobal(QPoint(0, 0))
+        bounds = QRect(parent_top_left, self.size())
+        margin = 6
+        x = int(anchor.x() - (width / 2))
+        y = int(anchor.y() - (height / 2))
+        min_x = bounds.left() + margin
+        max_x = bounds.right() - width - margin + 1
+        min_y = bounds.top() + margin
+        max_y = bounds.bottom() - height - margin + 1
+        if max_x < min_x:
+            max_x = min_x
+        if max_y < min_y:
+            max_y = min_y
+        x = max(min_x, min(x, max_x))
+        y = max(min_y, min(y, max_y))
+        dialog.move(x, y)
+
+    def _fetch_player_profile_async(self, dialog: PlayerCardDialog, context: Dict[str, Any]) -> None:
+        if not self.logic or not hasattr(self.logic, "fetch_player_profile"):
+            dialog.apply_profile({})
+            return
+        team_id = str(context.get("teamId") or "").strip()
+        team_tricode = str(context.get("teamTricode") or "").strip().upper()
+        player_id = str(context.get("playerId") or "").strip()
+        if not team_id and not player_id and not team_tricode:
+            dialog.apply_profile({})
+            return
+        try:
+            future = self._executor.submit(self._fetch_player_card_payload, dict(context))
+        except Exception:
+            dialog.apply_profile({})
+            return
+        future.add_done_callback(
+            lambda fut, d=dialog, ctx=dict(context): self._on_player_profile_ready(fut, d, ctx)
+        )
+
+    def _fetch_player_card_payload(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        payload = {"context": dict(context), "profile": {}, "headshotBytes": None, "teamLogoBytes": None}
+        if not self.logic:
+            return payload
+        sport = str(context.get("sport") or self.sport_name).upper()
+        team_id = str(context.get("teamId") or "").strip()
+        team_tricode = str(context.get("teamTricode") or "").strip().upper()
+        player_id = str(context.get("playerId") or "").strip()
+        player_name = str(context.get("playerName") or "").strip()
+        player_jersey = str(context.get("jersey") or "").strip()
+        profile: Dict[str, Any] = {}
+        if hasattr(self.logic, "fetch_player_profile"):
+            try:
+                raw_profile = self.logic.fetch_player_profile(
+                    sport,
+                    team_id,
+                    player_id=player_id,
+                    player_name=player_name,
+                    player_jersey=player_jersey,
+                    team_tricode=team_tricode,
+                )
+                if isinstance(raw_profile, dict):
+                    profile = dict(raw_profile)
+            except Exception:
+                profile = {}
+
+        headshot_bytes: bytes | None = None
+        headshot_url = str(profile.get("headshotUrl") or "").strip()
+        if headshot_url and hasattr(self.logic, "fetch_remote_bytes"):
+            try:
+                raw_bytes = self.logic.fetch_remote_bytes(headshot_url)
+                if isinstance(raw_bytes, (bytes, bytearray)):
+                    headshot_bytes = bytes(raw_bytes)
+            except Exception:
+                headshot_bytes = None
+
+        team_logo_bytes: bytes | None = None
+        if hasattr(self.logic, "load_logo") and team_tricode:
+            try:
+                raw_logo = self.logic.load_logo(sport, team_id, team_tricode)
+                if isinstance(raw_logo, (bytes, bytearray)):
+                    team_logo_bytes = bytes(raw_logo)
+            except Exception:
+                team_logo_bytes = None
+        if team_logo_bytes is None and team_tricode and hasattr(self.logic, "fetch_remote_bytes"):
+            fallback_logo_url = self._player_card_team_logo_url(sport, team_id, team_tricode)
+            if fallback_logo_url:
+                try:
+                    raw_logo = self.logic.fetch_remote_bytes(fallback_logo_url)
+                    if isinstance(raw_logo, (bytes, bytearray)):
+                        team_logo_bytes = bytes(raw_logo)
+                except Exception:
+                    team_logo_bytes = None
+
+        payload["profile"] = profile
+        payload["headshotBytes"] = headshot_bytes
+        payload["teamLogoBytes"] = team_logo_bytes
+        return payload
+
+    def _player_card_team_logo_url(self, sport: str, team_id: str, team_tricode: str) -> str:
+        sp = str(sport or "").strip().upper()
+        tid = str(team_id or "").strip()
+        tri = str(team_tricode or "").strip().upper()
+        if not tri and not tid:
+            return ""
+        if sp == "NBA":
+            code = {
+                "GSW": "gs",
+                "NOP": "no",
+                "NYK": "ny",
+                "SAS": "sa",
+                "WAS": "wsh",
+                "UTA": "uta",
+            }.get(tri, tri.lower())
+            return f"https://a.espncdn.com/i/teamlogos/nba/500/scoreboard/{code}.png"
+        if sp == "NFL" and tri:
+            return f"https://a.espncdn.com/i/teamlogos/nfl/500/{tri.lower()}.png"
+        if sp == "NHL" and tri:
+            code = {
+                "LAK": "la",
+                "NJD": "nj",
+                "SJS": "sj",
+                "TBL": "tb",
+                "UTAH": "utah",
+            }.get(tri, tri.lower())
+            return f"https://a.espncdn.com/i/teamlogos/nhl/500/{code}.png"
+        if sp == "MLB" and tri:
+            return f"https://a.espncdn.com/i/teamlogos/mlb/500/{tri.lower()}.png"
+        if sp == "MLS" and tid and tid not in {"0", "AWY", "HOM"}:
+            return f"https://a.espncdn.com/i/teamlogos/soccer/500/{tid}.png"
+        if sp == "NCAA FOOTBALL" and tid and tid not in {"0", "AWY", "HOM"}:
+            return f"https://a.espncdn.com/i/teamlogos/ncaa/500/{tid}.png"
+        return ""
+
+    def _on_player_profile_ready(self, future, dialog: PlayerCardDialog, context: Dict[str, Any]) -> None:
+        if not self._alive:
+            return
+        try:
+            payload = future.result()
+        except Exception:
+            payload = {"context": dict(context), "profile": {}, "headshotBytes": None, "teamLogoBytes": None}
+        if not isinstance(payload, dict):
+            payload = {"context": dict(context), "profile": {}, "headshotBytes": None, "teamLogoBytes": None}
+        payload.setdefault("context", dict(context))
+        self.player_profile_ready.emit(dialog, payload)
+
+    def _apply_player_profile_ready(self, dialog_obj: object, payload_obj: object) -> None:
+        if not self._alive:
+            return
+        if not isinstance(dialog_obj, PlayerCardDialog):
+            return
+        if not dialog_obj.isVisible():
+            return
+        payload = payload_obj if isinstance(payload_obj, dict) else {}
+        profile = payload.get("profile") if isinstance(payload.get("profile"), dict) else {}
+        dialog_obj.apply_profile(profile)
+        raw_headshot = payload.get("headshotBytes")
+        pixmap = None
+        if isinstance(raw_headshot, (bytes, bytearray)):
+            pm = QPixmap()
+            if pm.loadFromData(bytes(raw_headshot)):
+                pixmap = pm
+        dialog_obj.set_headshot(pixmap)
+        raw_team_logo = payload.get("teamLogoBytes")
+        logo_pixmap = None
+        if isinstance(raw_team_logo, (bytes, bytearray)):
+            pm = QPixmap()
+            if pm.loadFromData(bytes(raw_team_logo)):
+                logo_pixmap = pm
+        dialog_obj.set_team_logo(logo_pixmap)
 
     # --------------- timers ---------------
     def _setup_timers(self):
         self.scores_timer = QTimer(self)
         self.scores_timer.timeout.connect(self.refresh_scores)
-        self.scores_timer.start(30_000)
+        self._update_scores_poll_timer(restart=True)
 
         self.boxscore_timer = QTimer(self)
         self.boxscore_timer.timeout.connect(self.refresh_boxscore)
@@ -1963,6 +2790,27 @@ class ScoreSourceWindow(QMainWindow):
             return bool(re.search(r"\bq[1-4]\b|\bot\b|\blive\b", status_text))
         return False
 
+    def _scores_poll_interval_ms(self) -> int:
+        if any(self._normalize_status(g.get("status") or g.get("gameStatus"), g.get("gameStatusText")) == "live" for g in self.games):
+            return self.scores_poll_live_ms
+        if any(
+            self._normalize_status(g.get("status") or g.get("gameStatus"), g.get("gameStatusText")) == "upcoming"
+            for g in self.games
+        ):
+            return self.scores_poll_upcoming_ms
+        return self.scores_poll_idle_ms
+
+    def _update_scores_poll_timer(self, *, restart: bool = False) -> None:
+        timer = getattr(self, "scores_timer", None)
+        if timer is None:
+            return
+        interval_ms = self._scores_poll_interval_ms()
+        if timer.interval() != interval_ms:
+            timer.setInterval(interval_ms)
+            restart = True
+        if restart or not timer.isActive():
+            timer.start(interval_ms)
+
     def _boxscore_poll_interval_ms(self) -> int:
         sport = self.sport_name.upper()
         if sport != "NBA":
@@ -2031,10 +2879,9 @@ class ScoreSourceWindow(QMainWindow):
             pbp_label.set_ticker_speed(self._pbp_speed_px())
             pbp_label.update()
             self._ticker_last_ts = time.monotonic()
-        if self.sport_name.upper() == "NBA":
-            self._refresh_nba_merged_ticker(force=True)
-            if isinstance(pbp_label, TickerLabel) and pbp_label.is_ticker_enabled():
-                pbp_label.stop_ticker()
+        self._refresh_nba_merged_ticker(force=True)
+        if self.sport_name.upper() != "NBA" and isinstance(pbp_label, TickerLabel) and pbp_label.is_ticker_enabled():
+            pbp_label.stop_ticker()
         if self._cached_state is not None:
             try:
                 settings = self._cached_state.get("settings") or {}
@@ -2407,6 +3254,7 @@ class ScoreSourceWindow(QMainWindow):
         self.games = data.get("games", []) or []
         self.lines = []
         self._has_displayed_scores = True
+        self._update_scores_poll_timer(restart=True)
 
         self.game_combo.blockSignals(True)
         self.game_combo.clear()
@@ -2436,8 +3284,12 @@ class ScoreSourceWindow(QMainWindow):
                         status_state = "live" if lowered else "upcoming"
                 start_time = g.get("startTime")
                 start_time_local = g.get("startTimeLocal")
-                if not start_time_local and isinstance(start_time, str):
-                    start_time_local = iso_to_local(start_time)
+                if start_time:
+                    formatted_start = iso_to_local(start_time)
+                    if formatted_start != "--:--":
+                        start_time_local = formatted_start
+                        if status_state == "upcoming":
+                            status_text = formatted_start
                 away_tricode = (away_team.get("teamTricode") or away_team.get("tricode") or "").upper()
                 home_tricode = (home_team.get("teamTricode") or home_team.get("tricode") or "").upper()
                 line_text = f"{away_name} {away_score} @ {home_name} {home_score}"
@@ -2803,6 +3655,16 @@ class ScoreSourceWindow(QMainWindow):
             self._cache_runtime_boxscore(self.sport_name, current_game_id, data)
         self._has_displayed_boxscore = True
         self._last_boxscore_data = data
+        if current_game_id:
+            self._merge_live_game_state(
+                current_game_id,
+                away_score=(away or {}).get("score"),
+                home_score=(home or {}).get("score"),
+                status_text=str(data.get("header") or (game or {}).get("gameStatusText") or ""),
+                game_clock=(game or {}).get("gameClock"),
+                period=(game or {}).get("period"),
+                status=(game or {}).get("gameStatus") if (game or {}).get("gameStatus") is not None else (game or {}).get("status"),
+            )
 
         # quarter + clock
         self._apply_clock(data)
@@ -2899,6 +3761,13 @@ class ScoreSourceWindow(QMainWindow):
         if self.sport_name.upper() == "NHL":
             left_secondary = left_alt
             right_secondary = right_alt
+        if self.sport_name.upper() == "MLB":
+            left_override = MLB_BG_COLOR_OVERRIDES.get(left_tri)
+            right_override = MLB_BG_COLOR_OVERRIDES.get(right_tri)
+            if left_override:
+                left_color, left_secondary = left_override
+            if right_override:
+                right_color, right_secondary = right_override
         left_text = self._top_text_color(left_color)
         right_text = self._top_text_color(right_color)
         left_name_text = "#f7f7f7" if left_tri == "SAS" else left_text
@@ -2967,6 +3836,157 @@ class ScoreSourceWindow(QMainWindow):
         self._update_bottom_bar(left_team, right_team)  # away, home
         self._save_cached_state(data)
 
+    def _row_stats_from_values(self, table: QTableWidget, values: List[Any]) -> Dict[str, str]:
+        stats: Dict[str, str] = {}
+        limit = min(table.columnCount(), len(values))
+        for col in range(limit):
+            header_item = table.horizontalHeaderItem(col)
+            key = str(header_item.text() if header_item else f"Stat {col + 1}").strip()
+            if not key:
+                continue
+            val = str(values[col] if col < len(values) else "").strip()
+            if col != 1 and not val:
+                continue
+            stats[key] = val
+        return stats
+
+    def _set_player_context_on_row(self, table: QTableWidget, row: int, context: Dict[str, Any]) -> None:
+        name_item = table.item(row, 1)
+        if name_item is None:
+            name_item = QTableWidgetItem(str(context.get("playerName") or ""))
+            table.setItem(row, 1, name_item)
+        name_item.setData(PLAYER_CONTEXT_ROLE, context)
+
+    def _player_id_from_entry(self, player: Dict[str, Any]) -> str:
+        if not isinstance(player, dict):
+            return ""
+        for key in ("id", "personId", "playerId", "athleteId", "alternateId"):
+            val = player.get(key)
+            if val not in (None, ""):
+                return str(val)
+        athlete = player.get("athlete")
+        if isinstance(athlete, dict):
+            for key in ("id", "alternateId"):
+                val = athlete.get(key)
+                if val not in (None, ""):
+                    return str(val)
+            alt_ids = athlete.get("alternateIds")
+            if isinstance(alt_ids, dict):
+                for val in alt_ids.values():
+                    if val not in (None, ""):
+                        return str(val)
+        return ""
+
+    def _player_name_candidates(self, player: Dict[str, Any]) -> List[str]:
+        athlete = player.get("athlete") if isinstance(player.get("athlete"), dict) else {}
+        names = [
+            self._player_full_name(player),
+            player.get("fullName"),
+            player.get("displayName"),
+            player.get("name"),
+            athlete.get("fullName"),
+            athlete.get("displayName"),
+            athlete.get("name"),
+            athlete.get("shortName"),
+        ]
+        first = str(player.get("firstName") or athlete.get("firstName") or "").strip()
+        last = str(player.get("familyName") or athlete.get("lastName") or athlete.get("familyName") or "").strip()
+        if first or last:
+            names.append(f"{first} {last}".strip())
+        out: List[str] = []
+        seen: set[str] = set()
+        for raw in names:
+            token = str(raw or "").strip()
+            if not token:
+                continue
+            lowered = token.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            out.append(token)
+        return out
+
+    def _normalize_player_token(self, value: Any) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+    def _match_team_player_for_row(
+        self,
+        team: Dict[str, Any],
+        values: List[Any],
+        used_indices: set[int],
+    ) -> Dict[str, Any] | None:
+        players = team.get("players") or []
+        if not isinstance(players, list) or not players:
+            return None
+        row_name = str(values[1] if len(values) > 1 else "").strip()
+        row_jersey = str(values[0] if values else "").strip()
+        row_name_token = self._normalize_player_token(row_name)
+        candidates: list[tuple[int, int, Dict[str, Any]]] = []
+        for idx, player in enumerate(players):
+            if idx in used_indices or not isinstance(player, dict):
+                continue
+            p_jersey = self._player_jersey(player).strip()
+            score = 0
+            if row_jersey and p_jersey and row_jersey == p_jersey:
+                score += 4
+            p_names = self._player_name_candidates(player)
+            if row_name_token:
+                p_tokens = [self._normalize_player_token(name) for name in p_names]
+                if row_name_token in p_tokens:
+                    score += 5
+                else:
+                    row_parts = [p for p in re.split(r"[^a-z0-9]+", row_name.lower()) if p]
+                    if row_parts:
+                        row_last = row_parts[-1]
+                        row_initial = row_parts[0][:1]
+                        for name in p_names:
+                            parts = [p for p in re.split(r"[^a-z0-9]+", str(name).lower()) if p]
+                            if not parts:
+                                continue
+                            if parts[-1] == row_last:
+                                score += 2
+                                if row_initial and parts[0].startswith(row_initial):
+                                    score += 1
+                                break
+            if score > 0:
+                candidates.append((score, idx, player))
+                if score >= 9:
+                    break
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        _, chosen_idx, chosen = candidates[0]
+        used_indices.add(chosen_idx)
+        return chosen
+
+    def _build_player_context(
+        self,
+        team: Dict[str, Any],
+        player: Dict[str, Any] | None,
+        *,
+        row_stats: Dict[str, str] | None = None,
+    ) -> Dict[str, Any]:
+        tri = str(team.get("teamTricode") or team.get("tricode") or "").upper()
+        context: Dict[str, Any] = {
+            "sport": self.sport_name.upper(),
+            "teamId": str(team.get("teamId") or team.get("id") or ""),
+            "teamTricode": tri,
+            "teamName": str(team.get("teamName") or team.get("displayName") or team.get("name") or ""),
+            "teamColor": self._team_color(tri),
+            "rowStats": dict(row_stats or {}),
+        }
+        if isinstance(player, dict):
+            context["playerData"] = dict(player)
+            context["playerId"] = self._player_id_from_entry(player)
+            context["playerName"] = self._player_full_name(player)
+            context["jersey"] = self._player_jersey(player)
+            context["position"] = self._player_position(player)
+            if self.sport_name.upper() == "MLB":
+                lineup_order = self._mlb_lineup_order(player)
+                if lineup_order:
+                    context["lineupOrder"] = str(lineup_order)
+        return context
+
     def fill_team_table(self, table: QTableWidget, team: Dict[str, Any], *, show_lineups: bool = False):
         if show_lineups:
             self._fill_lineup_table(table, team)
@@ -2990,6 +4010,7 @@ class ScoreSourceWindow(QMainWindow):
         if rows:
             table.setRowCount(0)
             headers_count = table.columnCount()
+            used_player_indices: set[int] = set()
             for values in rows:
                 row = table.rowCount()
                 table.insertRow(row)
@@ -3000,6 +4021,16 @@ class ScoreSourceWindow(QMainWindow):
                     elif col in (0, 2, 4, 5, 6, 7):
                         item.setTextAlignment(Qt.AlignCenter)
                     table.setItem(row, col, item)
+                row_stats = self._row_stats_from_values(table, values)
+                matched = self._match_team_player_for_row(team, values, used_player_indices)
+                context = self._build_player_context(team, matched, row_stats=row_stats)
+                if len(values) > 1 and not context.get("playerName"):
+                    context["playerName"] = str(values[1] or "")
+                if values and not context.get("jersey"):
+                    context["jersey"] = str(values[0] or "")
+                if len(values) > 2 and not context.get("position"):
+                    context["position"] = str(values[2] or "")
+                self._set_player_context_on_row(table, row, context)
             return
 
         table.setRowCount(0)
@@ -3086,6 +4117,11 @@ class ScoreSourceWindow(QMainWindow):
                 elif col in alignment_cols:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            row_stats = self._row_stats_from_values(table, values)
+            context = self._build_player_context(team, p, row_stats=row_stats)
+            if not context.get("playerName"):
+                context["playerName"] = name
+            self._set_player_context_on_row(table, row, context)
 
     def _fill_nfl_table(self, table: QTableWidget, team: Dict[str, Any]) -> None:
         players = team.get("players", []) or []
@@ -3135,6 +4171,9 @@ class ScoreSourceWindow(QMainWindow):
                 elif col in (0, 2, 3, 4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            row_stats = self._row_stats_from_values(table, values)
+            context = self._build_player_context(team, p, row_stats=row_stats)
+            self._set_player_context_on_row(table, row, context)
 
     def _set_nfl_table_mode(self, table: QTableWidget, mode: str) -> None:
         headers = NFL_OFFENSE_HEADERS if mode == "offense" else NFL_DEFENSE_HEADERS
@@ -3298,6 +4337,11 @@ class ScoreSourceWindow(QMainWindow):
                 else:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            row_stats = self._row_stats_from_values(table, values)
+            context = self._build_player_context(team, p, row_stats=row_stats)
+            if not context.get("playerName"):
+                context["playerName"] = name
+            self._set_player_context_on_row(table, row, context)
 
     def _fill_nba_scroll_table(self, table: QTableWidget, team: Dict[str, Any]) -> None:
         self._configure_nba_table(table)
@@ -3389,6 +4433,11 @@ class ScoreSourceWindow(QMainWindow):
                 else:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            row_stats = self._row_stats_from_values(table, values)
+            context = self._build_player_context(team, p, row_stats=row_stats)
+            if not context.get("playerName"):
+                context["playerName"] = name
+            self._set_player_context_on_row(table, row, context)
 
     def _nfl_section_values(self, label: str) -> list[str]:
         return ["", label, "", "", "", "", "", ""]
@@ -3472,12 +4521,13 @@ class ScoreSourceWindow(QMainWindow):
         return (tackles, assists)
 
     def _fill_lineup_table(self, table: QTableWidget, team: Dict[str, Any]) -> None:
+        lineup_players = self._lineup_players(team)
         rows = self._lineup_rows(team)
         table.setRowCount(0)
         headers_count = table.columnCount()
         if not rows:
             rows = [["", "Lineups TBD", ""]]
-        for values in rows:
+        for idx, values in enumerate(rows):
             padded = list(values) + [""] * max(0, headers_count - len(values))
             row = table.rowCount()
             table.insertRow(row)
@@ -3488,6 +4538,18 @@ class ScoreSourceWindow(QMainWindow):
                 elif col in (0, 2, 4, 5, 6, 7):
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            if str(values[1] if len(values) > 1 else "").strip().lower() == "lineups tbd":
+                continue
+            player = lineup_players[idx] if idx < len(lineup_players) else None
+            row_stats = self._row_stats_from_values(table, padded)
+            context = self._build_player_context(team, player, row_stats=row_stats)
+            if len(values) > 1 and not context.get("playerName"):
+                context["playerName"] = str(values[1] or "")
+            if values and not context.get("jersey"):
+                context["jersey"] = str(values[0] or "")
+            if len(values) > 2 and not context.get("position"):
+                context["position"] = str(values[2] or "")
+            self._set_player_context_on_row(table, row, context)
 
     def _lineup_rows(self, team: Dict[str, Any]) -> List[List[str]]:
         players = self._lineup_players(team)
@@ -3560,6 +4622,17 @@ class ScoreSourceWindow(QMainWindow):
             name = athlete.get("fullName") or athlete.get("displayName") or athlete.get("name")
         return str(name or "")
 
+    def _player_full_name(self, player: Dict[str, Any]) -> str:
+        athlete = player.get("athlete") or {}
+        first = (player.get("firstName") or athlete.get("firstName") or "").strip()
+        last = (player.get("familyName") or athlete.get("lastName") or athlete.get("familyName") or "").strip()
+        if first or last:
+            return f"{first} {last}".strip()
+        name = player.get("fullName") or player.get("displayName") or player.get("name")
+        if not name and isinstance(athlete, dict):
+            name = athlete.get("fullName") or athlete.get("displayName") or athlete.get("name")
+        return str(name or "")
+
     def _player_position(self, player: Dict[str, Any]) -> str:
         athlete = player.get("athlete") or {}
         pos = player.get("position") or athlete.get("position")
@@ -3576,6 +4649,24 @@ class ScoreSourceWindow(QMainWindow):
             or athlete.get("jersey")
         )
         return str(jersey or "")
+
+    def _mlb_lineup_order(self, player: Dict[str, Any]) -> int | None:
+        stats = player.get("statistics") if isinstance(player.get("statistics"), dict) else {}
+        for key in ("order", "batOrder", "lineupOrder", "battingOrder"):
+            raw = player.get(key)
+            if raw in (None, ""):
+                raw = stats.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                order = int(str(raw).strip())
+            except Exception:
+                continue
+            if order > 9 and order % 100 == 0:
+                order = order // 100
+            if order > 0:
+                return order
+        return None
 
     def _lineup_size(self) -> int:
         sport = self.sport_name.upper()
@@ -3625,6 +4716,136 @@ class ScoreSourceWindow(QMainWindow):
         if any(key in lowered for key in ("am", "pm", "scheduled", "tba", "starts")):
             return "upcoming"
         return ""
+
+    def _game_status_payload(self, game: Dict[str, Any]) -> tuple[str, str, str | None]:
+        status_text = str(game.get("gameStatusText") or game.get("statusText") or "Scheduled")
+        if self.sport_name.upper() == "MLB":
+            status_text = self._mlb_arrow_status_text(status_text)
+        status_state = self._normalize_status(game.get("status") or game.get("gameStatus"), status_text)
+        start_time = game.get("startTime")
+        start_time_local = game.get("startTimeLocal")
+        if start_time:
+            formatted_start = iso_to_local(start_time)
+            if formatted_start != "--:--":
+                start_time_local = formatted_start
+                if status_state == "upcoming":
+                    status_text = formatted_start
+        if status_state not in ("live", "upcoming", "final"):
+            status_state = "live" if status_text else "upcoming"
+        return status_text, status_state, start_time_local
+
+    def _sync_combo_entry_from_game(self, game: Dict[str, Any]) -> None:
+        game_id = str(game.get("gameId") or "")
+        row = self._combo_game_row_by_id.get(game_id)
+        if not row:
+            return
+        away_team = game.get("awayTeam") or {}
+        home_team = game.get("homeTeam") or {}
+        away_name = away_team.get("teamName", "Away")
+        home_name = home_team.get("teamName", "Home")
+        away_score = int(away_team.get("score") or 0)
+        home_score = int(home_team.get("score") or 0)
+        status_text, status_state, start_time_local = self._game_status_payload(game)
+        line_text = f"{away_name} {away_score} @ {home_name} {home_score}"
+        self.game_combo.blockSignals(True)
+        self.game_combo.setItemText(row, line_text)
+        self.game_combo.setItemData(
+            row,
+            {
+                "gameId": game.get("gameId"),
+                "away_name": away_name,
+                "home_name": home_name,
+                "away_score": away_score,
+                "home_score": home_score,
+                "status_text": status_text,
+                "status_state": status_state,
+                "startTime": game.get("startTime"),
+                "startTimeLocal": start_time_local,
+                "away_tricode": (away_team.get("teamTricode") or away_team.get("tricode") or "").upper(),
+                "home_tricode": (home_team.get("teamTricode") or home_team.get("tricode") or "").upper(),
+            },
+            GAME_DATA_ROLE,
+        )
+        self.game_combo.blockSignals(False)
+
+    def _rebuild_score_lines(self) -> None:
+        lines: list[str] = []
+        for game in self.games:
+            away_team = game.get("awayTeam") or {}
+            home_team = game.get("homeTeam") or {}
+            away_name = away_team.get("teamName", "Away")
+            home_name = home_team.get("teamName", "Home")
+            away_score = int(away_team.get("score") or 0)
+            home_score = int(home_team.get("score") or 0)
+            status_text, _, _ = self._game_status_payload(game)
+            lines.append(f"{away_name} {away_score} @ {home_name} {home_score} ({status_text})")
+        self.lines = lines
+
+    def _merge_live_game_state(
+        self,
+        game_id: str,
+        *,
+        away_score: Any = None,
+        home_score: Any = None,
+        status_text: str | None = None,
+        game_clock: Any = None,
+        period: Any = None,
+        status: Any = None,
+    ) -> None:
+        if not game_id:
+            return
+        updated_game: Dict[str, Any] | None = None
+        for idx, game in enumerate(self.games):
+            if str(game.get("gameId") or "") != str(game_id):
+                continue
+            merged = dict(game)
+            away_team = dict(merged.get("awayTeam") or {})
+            home_team = dict(merged.get("homeTeam") or {})
+            if away_score not in (None, ""):
+                try:
+                    away_team["score"] = int(away_score)
+                except Exception:
+                    pass
+            if home_score not in (None, ""):
+                try:
+                    home_team["score"] = int(home_score)
+                except Exception:
+                    pass
+            if away_team:
+                merged["awayTeam"] = away_team
+            if home_team:
+                merged["homeTeam"] = home_team
+            if status not in (None, ""):
+                normalized_status = self._normalize_status(status, status_text)
+                if isinstance(status, int):
+                    merged["gameStatus"] = status
+                    if normalized_status:
+                        merged["status"] = normalized_status
+                else:
+                    merged["status"] = normalized_status or str(status).lower()
+                    if merged["status"] == "final":
+                        merged["gameStatus"] = 3
+                    elif merged["status"] == "upcoming":
+                        merged["gameStatus"] = 1
+                    elif merged["status"]:
+                        merged["gameStatus"] = 2
+            if game_clock not in (None, ""):
+                merged["gameClock"] = game_clock
+            if period not in (None, ""):
+                merged["period"] = period if isinstance(period, dict) else {"current": period}
+            if status_text:
+                merged["gameStatusText"] = status_text
+                merged["header"] = status_text
+            updated_game = merged
+            self.games[idx] = merged
+            break
+        if updated_game is None:
+            return
+        self._sync_combo_entry_from_game(updated_game)
+        self._rebuild_score_lines()
+        self._cache_runtime_scores(self.sport_name, self.games, self.lines, selected_game_id=self.selected_game_id)
+        self._update_scores_poll_timer(restart=True)
+        self._refresh_nba_merged_ticker(force=True)
 
     def _set_table_titles(self, show_lineups: bool) -> None:
         left = "LINEUP" if show_lineups else "STATS"
@@ -3870,24 +5091,13 @@ class ScoreSourceWindow(QMainWindow):
         self.games = []
         self._clock_state = None
         self.center_panel.set_state("Q-", "00:00", "", "--")
-        if self.sport_name.upper() == "NBA":
-            if hasattr(self, "pbp_bar"):
-                self.pbp_bar.setVisible(False)
-            self._pbp_lines = []
-            self._refresh_nba_merged_ticker(force=True, fallback=message or "No games today.")
-            pbp_label = getattr(self, "pbp_ticker_label", None)
-            if isinstance(pbp_label, TickerLabel):
-                pbp_label.stop_ticker()
-        else:
-            self.bottom_left_label.setVisible(True)
-            self.bottom_right_label.setVisible(True)
-            self.bottom_center_label.setVisible(True)
-            self.bottom_center_label.setAlignment(Qt.AlignCenter)
-            self.bottom_left_label.setText("AWY (--)")
-            self.bottom_right_label.setText("HME (--)")
-            self.bottom_center_label.setText(message or "No games today.")
-            if hasattr(self, "pbp_bar"):
-                self.pbp_bar.setVisible(False)
+        if hasattr(self, "pbp_bar"):
+            self.pbp_bar.setVisible(False)
+        self._pbp_lines = []
+        self._refresh_nba_merged_ticker(force=True, fallback=message or "No games today.")
+        pbp_label = getattr(self, "pbp_ticker_label", None)
+        if isinstance(pbp_label, TickerLabel):
+            pbp_label.stop_ticker()
         if hasattr(self, "game_combo"):
             self.game_combo.blockSignals(True)
             try:
@@ -3906,6 +5116,11 @@ class ScoreSourceWindow(QMainWindow):
     def closeEvent(self, event):
         self._alive = False
         self._flush_cached_state()
+        if self._active_player_card is not None:
+            try:
+                self._active_player_card.close()
+            except Exception:
+                pass
         try:
             if self.logic:
                 self.logic.stop_realtime()
@@ -3978,9 +5193,16 @@ class ScoreSourceWindow(QMainWindow):
                 stale_window = stale_window_default
                 if feed_interval_avg is not None:
                     stale_window = max(stale_window, min(60.0, feed_interval_avg * 1.5))
-                synthetic_window = min(stale_window, 2.0 if sport == "NBA" else 4.0)
+                if sport == "NBA":
+                    synthetic_window = min(stale_window, 2.0)
+                elif sport == "NHL":
+                    synthetic_window = min(stale_window, 1.25)
+                else:
+                    synthetic_window = min(stale_window, 4.0)
                 if prev.get("raw_running") and (now - last_feed_ts) <= synthetic_window:
                     clock_running = True
+            if sport == "NHL" and raw_secs <= 0.1:
+                clock_running = False
 
         clock_secs = None
         if raw_secs is not None:
@@ -4126,7 +5348,7 @@ class ScoreSourceWindow(QMainWindow):
         if sport_upper == "NBA":
             return True, buffer_sec, 2.0
         if sport_upper == "NHL":
-            return True, buffer_sec, 8.0
+            return True, buffer_sec, 3.0
         if sport_upper in ("NFL", "NCAA FOOTBALL"):
             return True, buffer_sec, 4.0
         return False, buffer_sec, self.clock_feed_stale_sec
@@ -4139,9 +5361,11 @@ class ScoreSourceWindow(QMainWindow):
             if status_val in (0, 1) or status_val >= 3:
                 return False
         period_upper = (period_text or "").upper()
-        if period_upper in ("FINAL", "HALF TIME", "INTERMISSION", "Q-", "P-"):
+        if period_upper in ("FINAL", "HALF TIME", "INTERMISSION", "INT", "Q-", "P-"):
             return False
         if period_upper.startswith("INTERMISSION"):
+            return False
+        if period_upper.startswith("INT"):
             return False
         if period_upper.startswith("END OF"):
             return False
@@ -4308,9 +5532,9 @@ class ScoreSourceWindow(QMainWindow):
         if sport == "NHL":
             clock_source = game.get("gameClock") or raw_clock or raw_status
             clock_secs = self._clock_to_seconds(clock_source)
-            intermission_label = "INTERMISSION"
+            intermission_label = "INT"
             if isinstance(current_period, int) and current_period in (1, 2):
-                intermission_label = f"INTERMISSION {current_period}"
+                intermission_label = f"INT {current_period}"
             combined_status = f"{raw_status} {game.get('_header') or ''} {raw_clock}".lower()
             if "intermission" in status_text or "intermission" in clock_text:
                 return intermission_label
@@ -4461,35 +5685,9 @@ class ScoreSourceWindow(QMainWindow):
 
     def _update_bottom_bar(self, away: Dict[str, Any], home: Dict[str, Any]):
         sport = self.sport_name.upper()
-        if sport in ("NBA", "NFL", "NHL"):
-            if sport != "NBA":
-                self._pbp_lines = self._ticker_info_lines()
-            self._refresh_nba_merged_ticker()
-            return
-        self.bottom_left_label.setVisible(True)
-        self.bottom_right_label.setVisible(True)
-        self.bottom_center_label.setVisible(True)
-        self.bottom_center_label.setAlignment(Qt.AlignCenter)
-        self.bottom_center_label.setStyleSheet(f"color: {ACCENT}; font-weight: 800; font-size: 14px;")
-        away_tri = (away.get("teamTricode") or "AWY").upper()
-        home_tri = (home.get("teamTricode") or "HME").upper()
-        away_rec = self._team_record_text(away)
-        home_rec = self._team_record_text(home)
-        self._set_label_text(self.bottom_left_label, f"{away_tri} ({away_rec})", animate=True)
-        self._set_label_text(self.bottom_right_label, f"{home_tri} ({home_rec})", animate=True)
-        bonus_text = ""
-        away_bonus = away.get("inBonus")
-        home_bonus = home.get("inBonus")
-        if away_bonus and home_bonus:
-            bonus_text = "BONUS BOTH"
-        elif away_bonus:
-            bonus_text = f"BONUS {away_tri}"
-        elif home_bonus:
-            bonus_text = f"BONUS {home_tri}"
-        self._set_label_text(self.bottom_center_label, bonus_text or " ", animate=True)
-        # apply alt accent to labels
-        self.bottom_left_label.setStyleSheet(f"color: {self._team_alt_color(away_tri)}; font-weight: bold; font-size: 14px;")
-        self.bottom_right_label.setStyleSheet(f"color: {self._team_alt_color(home_tri)}; font-weight: bold; font-size: 14px;")
+        if sport != "NBA":
+            self._pbp_lines = []
+        self._refresh_nba_merged_ticker()
 
     def _elide_label_text(self, label: QLabel, text: str) -> str:
         width = max(0, label.width() - 12)
@@ -4614,36 +5812,48 @@ class ScoreSourceWindow(QMainWindow):
         return self._rss_headlines[idx]
 
     def _nba_ticker_text(self, fallback: str | None = None) -> str:
-        parts = [line for line in self.lines if line]
-        if parts:
-            sep = "   |   "
-            return f"{sep.join(parts)}{sep}"
-        return fallback or "No games today."
+        return self._score_ticker_text(fallback)
 
     def _nba_merged_ticker_text(self, fallback: str | None = None) -> str:
-        pbp_lines = [line for line in self._pbp_lines if line]
-        games = list(self.games or [])
-        segments: list[str] = []
-        max_len = max(len(pbp_lines), len(games))
-        for idx in range(max_len):
-            if idx < len(pbp_lines):
-                segments.append(pbp_lines[idx])
-            if idx < len(games):
-                segments.append(self._nba_game_segment_text(games[idx]))
-        if segments:
-            sep = "   |   "
-            return f"{sep.join(segments)}{sep}"
-        return fallback or "No games today."
+        return self._score_ticker_text(fallback)
 
     def _nba_merged_ticker_key(self) -> tuple[Any, ...]:
-        return ("merged", self._nba_ticker_key(), tuple(self._pbp_lines))
+        return self._score_ticker_key()
 
     def _nba_ticker_key(self) -> tuple[tuple[Any, ...], ...]:
+        return self._score_ticker_games_key()
+
+    def _ticker_boxscore_data(self) -> Dict[str, Any]:
+        game_id = str(self.selected_game_id or self._pending_selection_id or "")
+        if not game_id:
+            return {}
+        expected_key = (self.sport_name, game_id)
+        if self._displayed_boxscore_key == expected_key and isinstance(self._last_boxscore_data, dict):
+            return self._last_boxscore_data
+        cached = self._runtime_boxscore(self.sport_name, game_id)
+        return cached if isinstance(cached, dict) else {}
+
+    def _ticker_games(self) -> list[Dict[str, Any]]:
+        ordered: list[Dict[str, Any]] = []
+        selected_id = str(self.selected_game_id or self._pending_selection_id or "")
+        if selected_id:
+            selected = next((g for g in self.games if str(g.get("gameId") or "") == selected_id), None)
+            if isinstance(selected, dict):
+                ordered.append(selected)
+        for game in self.games:
+            if not isinstance(game, dict):
+                continue
+            if selected_id and str(game.get("gameId") or "") == selected_id:
+                continue
+            ordered.append(game)
+        return ordered
+
+    def _score_ticker_games_key(self) -> tuple[tuple[Any, ...], ...]:
         key_parts: list[tuple[Any, ...]] = []
-        for g in self.games:
+        for g in self._ticker_games():
             away = g.get("awayTeam") or {}
             home = g.get("homeTeam") or {}
-            status_text = g.get("gameStatusText") or g.get("statusText") or ""
+            status_text, _, _ = self._game_status_payload(g)
             key_parts.append(
                 (
                     g.get("gameId") or "",
@@ -4654,34 +5864,81 @@ class ScoreSourceWindow(QMainWindow):
             )
         return tuple(key_parts)
 
-    def _nba_game_segment_text(self, game: Dict[str, Any]) -> str:
+    def _score_ticker_status_text(self, game: Dict[str, Any]) -> str:
+        status_text, status_state, _ = self._game_status_payload(game)
+        if status_state == "final" and not status_text:
+            return "Final"
+        return status_text
+
+    def _score_ticker_game_segment_text(self, game: Dict[str, Any]) -> str:
         away = game.get("awayTeam") or {}
         home = game.get("homeTeam") or {}
         away_tri = (away.get("teamTricode") or away.get("tricode") or "").upper()
         home_tri = (home.get("teamTricode") or home.get("tricode") or "").upper()
         away_score = self.backend.safe_score(away)
         home_score = self.backend.safe_score(home)
-        status_text = game.get("gameStatusText") or game.get("statusText") or ""
+        status_text = self._score_ticker_status_text(game)
         segment = f"{away_tri} {away_score} @ {home_tri} {home_score}"
         if status_text:
-            segment += f" ({status_text})"
+            segment += f" [{status_text}]"
         return segment
 
-    def _ticker_info_lines(self) -> list[str]:
+    def _selected_ticker_detail_lines(self) -> list[str]:
         sport = self.sport_name.upper()
-        if sport not in ("NFL", "NHL"):
-            return []
-        data = self._last_boxscore_data or {}
-        if not data:
-            return []
-        if sport == "NFL":
-            line = self._format_nfl_info_line(data)
-        else:
-            line = self._format_nhl_info_line(data)
-        if not line:
-            return []
-        count = max(1, len(self.games))
-        return [line] * count
+        data = self._ticker_boxscore_data()
+        lines: list[str] = []
+        primary = self._format_selected_info_line(data)
+        if primary:
+            lines.append(primary)
+        if sport == "NBA":
+            for line in self._pbp_lines[:3]:
+                cleaned = str(line or "").strip()
+                if cleaned:
+                    lines.append(f"PLAY {cleaned}")
+        return lines
+
+    def _ticker_info_lines(self) -> list[str]:
+        return self._selected_ticker_detail_lines()
+
+    def _format_selected_info_line(self, data: Dict[str, Any]) -> str:
+        sport = self.sport_name.upper()
+        if not isinstance(data, dict) or not data:
+            return ""
+        if sport == "NBA":
+            return self._format_nba_info_line(data)
+        if sport in ("NFL", "NCAA FOOTBALL"):
+            return self._format_nfl_info_line(data)
+        if sport == "NHL":
+            return self._format_nhl_info_line(data)
+        if sport == "MLB":
+            return self._format_mlb_info_line(data)
+        return self._format_generic_info_line(data)
+
+    def _format_nba_info_line(self, data: Dict[str, Any]) -> str:
+        game = data.get("game") or {}
+        away = data.get("away") or {}
+        home = data.get("home") or {}
+        away_tri = (away.get("teamTricode") or "AWY")[:3].upper()
+        home_tri = (home.get("teamTricode") or "HME")[:3].upper()
+        away_score = self.backend.safe_score(away)
+        home_score = self.backend.safe_score(home)
+        period_text = self._format_period_badge({**game, "_header": data.get("header")})
+        clock_text = (
+            self._normalize_pbp_clock(game.get("gameClock"))
+            or self._normalize_pbp_clock(game.get("gameStatusText"))
+            or self._normalize_pbp_clock(data.get("header"))
+        )
+        time_parts = [part for part in (period_text, clock_text) if part and part not in ("Q-", "FINAL")]
+        shot_text = str(data.get("shotclock") or "").strip()
+        extras = []
+        if time_parts:
+            extras.append(" ".join(time_parts))
+        if shot_text and shot_text != "--":
+            extras.append(f"SHOT {shot_text}")
+        line = f"{away_tri} {away_score} @ {home_tri} {home_score}"
+        if extras:
+            line = f"{line} | {' | '.join(extras)}"
+        return line.strip()
 
     def _format_nfl_info_line(self, data: Dict[str, Any]) -> str:
         game = data.get("game") or {}
@@ -4741,7 +5998,59 @@ class ScoreSourceWindow(QMainWindow):
             line = f"{line} | {shots_part}"
         return line.strip()
 
-    def _nba_game_segment_pieces(self, game: Dict[str, Any]) -> list[tuple[str, Any]]:
+    def _format_mlb_info_line(self, data: Dict[str, Any]) -> str:
+        game = data.get("game") or {}
+        away = data.get("away") or {}
+        home = data.get("home") or {}
+        away_tri = (away.get("teamTricode") or "AWY")[:3].upper()
+        home_tri = (home.get("teamTricode") or "HME")[:3].upper()
+        away_score = self.backend.safe_score(away)
+        home_score = self.backend.safe_score(home)
+        period_text = self._format_period_badge({**game, "_header": data.get("header")})
+        situation = game.get("situation") or {}
+        extras: list[str] = []
+        if period_text and period_text not in ("Q-", "FINAL"):
+            extras.append(period_text)
+        balls = situation.get("balls")
+        strikes = situation.get("strikes")
+        outs = situation.get("outs")
+        try:
+            if balls is not None and strikes is not None:
+                extras.append(f"COUNT {int(balls)}-{int(strikes)}")
+        except Exception:
+            pass
+        try:
+            if outs is not None:
+                out_count = int(outs)
+                extras.append(f"{out_count} OUT" if out_count == 1 else f"{out_count} OUTS")
+        except Exception:
+            pass
+        line = f"{away_tri} {away_score} @ {home_tri} {home_score}"
+        if extras:
+            line = f"{line} | {' | '.join(extras)}"
+        return line.strip()
+
+    def _format_generic_info_line(self, data: Dict[str, Any]) -> str:
+        game = data.get("game") or {}
+        away = data.get("away") or {}
+        home = data.get("home") or {}
+        away_tri = (away.get("teamTricode") or "AWY")[:3].upper()
+        home_tri = (home.get("teamTricode") or "HME")[:3].upper()
+        away_score = self.backend.safe_score(away)
+        home_score = self.backend.safe_score(home)
+        period_text = self._format_period_badge({**game, "_header": data.get("header")})
+        clock_text = (
+            self._normalize_pbp_clock(game.get("gameClock"))
+            or self._normalize_pbp_clock(game.get("gameStatusText"))
+            or self._normalize_pbp_clock(data.get("header"))
+        )
+        extras = [part for part in (period_text, clock_text) if part and part not in ("Q-", "P-")]
+        line = f"{away_tri} {away_score} @ {home_tri} {home_score}"
+        if extras:
+            line = f"{line} | {' | '.join(extras)}"
+        return line.strip()
+
+    def _score_ticker_game_segment_pieces(self, game: Dict[str, Any]) -> list[tuple[str, Any]]:
         pieces: list[tuple[str, Any]] = []
         away = game.get("awayTeam") or {}
         home = game.get("homeTeam") or {}
@@ -4749,7 +6058,7 @@ class ScoreSourceWindow(QMainWindow):
         home_tri = (home.get("teamTricode") or home.get("tricode") or "").upper()
         away_score = self.backend.safe_score(away)
         home_score = self.backend.safe_score(home)
-        status_text = game.get("gameStatusText") or game.get("statusText") or ""
+        status_text = self._score_ticker_status_text(game)
 
         away_logo_key = self._team_logo_key(away)
         away_pix = None
@@ -4777,35 +6086,48 @@ class ScoreSourceWindow(QMainWindow):
         pieces.append(("text", f"{home_tri} {home_score}"))
         if status_text:
             pieces.append(("gap", TICKER_TEXT_GAP))
-            pieces.append(("text", f"({status_text})"))
+            pieces.append(("text", f"[{status_text}]"))
         return pieces
 
     def _nba_ticker_pieces(self) -> list[tuple[str, Any]]:
+        return self._score_ticker_pieces()
+
+    def _nba_merged_ticker_pieces(self) -> list[tuple[str, Any]]:
+        return self._score_ticker_pieces()
+
+    def _score_ticker_pieces(self) -> list[tuple[str, Any]]:
         pieces: list[tuple[str, Any]] = []
-        for g in self.games:
-            pieces.extend(self._nba_game_segment_pieces(g))
+        for line in self._selected_ticker_detail_lines():
+            pieces.append(("text", line))
+            pieces.append(("gap", TICKER_SEGMENT_GAP))
+        for game in self._ticker_games():
+            pieces.extend(self._score_ticker_game_segment_pieces(game))
             pieces.append(("gap", TICKER_SEGMENT_GAP))
         return pieces
 
-    def _nba_merged_ticker_pieces(self) -> list[tuple[str, Any]]:
-        pieces: list[tuple[str, Any]] = []
-        pbp_lines = [line for line in self._pbp_lines if line]
-        games = list(self.games or [])
-        max_len = max(len(pbp_lines), len(games))
-        for idx in range(max_len):
-            if idx < len(pbp_lines):
-                pieces.append(("text", pbp_lines[idx]))
-                pieces.append(("gap", TICKER_SEGMENT_GAP))
-            if idx < len(games):
-                pieces.extend(self._nba_game_segment_pieces(games[idx]))
-                pieces.append(("gap", TICKER_SEGMENT_GAP))
-        return pieces
+    def _score_ticker_text(self, fallback: str | None = None) -> str:
+        segments = [line for line in self._selected_ticker_detail_lines() if line]
+        segments.extend(self._score_ticker_game_segment_text(game) for game in self._ticker_games())
+        segments = [segment for segment in segments if segment]
+        if segments:
+            sep = "   |   "
+            return f"{sep.join(segments)}{sep}"
+        return fallback or "No games today."
+
+    def _score_ticker_key(self) -> tuple[Any, ...]:
+        return ("score_ticker", tuple(self._selected_ticker_detail_lines()), self._score_ticker_games_key())
+
+    def _nba_game_segment_text(self, game: Dict[str, Any]) -> str:
+        return self._score_ticker_game_segment_text(game)
+
+    def _nba_game_segment_pieces(self, game: Dict[str, Any]) -> list[tuple[str, Any]]:
+        return self._score_ticker_game_segment_pieces(game)
 
     def _refresh_nba_merged_ticker(self, *, force: bool = False, fallback: str | None = None) -> None:
         self._set_bottom_bar_ticker(
-            self._nba_merged_ticker_text(fallback),
-            pieces=self._nba_merged_ticker_pieces(),
-            key=self._nba_merged_ticker_key(),
+            self._score_ticker_text(fallback),
+            pieces=self._score_ticker_pieces(),
+            key=self._score_ticker_key(),
             force=force,
         )
 
@@ -5067,6 +6389,18 @@ class ScoreSourceWindow(QMainWindow):
             right_text = shot_text
         self.center_panel.set_state(period_text, clock_text, left_text, right_text, center_text)
         self._clock_state = clock_state
+        live_status_text = " ".join(
+            part for part in (period_text if period_text not in ("Q-", "P-", "FINAL") else "", clock_text) if part
+        ).strip() or "Live"
+        self._merge_live_game_state(
+            state.game_id,
+            away_score=state.away_score,
+            home_score=state.home_score,
+            status_text=live_status_text,
+            game_clock=state.game_clock_raw or state.game_clock_text,
+            period={"current": state.period} if state.period else {},
+            status="live",
+        )
         if state.home_score is not None:
             self.home_score.setText(str(state.home_score))
         if state.away_score is not None:
@@ -5079,6 +6413,32 @@ class ScoreSourceWindow(QMainWindow):
         except Exception:
             return None
         return None
+
+    def _should_apply_cached_live_state(self, cached: Dict[str, Any]) -> bool:
+        if not isinstance(cached, dict):
+            return False
+        scores = cached.get("scores") or {}
+        games = scores.get("games") or []
+        if not isinstance(games, list) or not games:
+            return True
+        selected_id = str(cached.get("selected_game_id") or "")
+        target_game = None
+        if selected_id:
+            target_game = next((g for g in games if str((g or {}).get("gameId") or "") == selected_id), None)
+        if target_game is None:
+            target_game = next((g for g in games if isinstance(g, dict) and self._is_game_live(g)), None)
+        if not isinstance(target_game, dict) or not self._is_game_live(target_game):
+            return True
+        try:
+            cached_ts = float(cached.get("ts") or 0.0)
+        except Exception:
+            cached_ts = 0.0
+        if cached_ts <= 0:
+            return False
+        age_sec = max(0.0, time.time() - cached_ts)
+        if self.sport_name.upper() == "NHL":
+            return age_sec <= 12.0
+        return age_sec <= 30.0
 
     def _apply_cached_state_if_available(self):
         if not self._cached_state:
@@ -5113,6 +6473,8 @@ class ScoreSourceWindow(QMainWindow):
                 pass
             self._sync_ticker_speed_actions()
         self.ticker_speed_px = max(self.ticker_speed_px, TICKER_SPEED_PX)
+        if not self._should_apply_cached_live_state(cached):
+            return
         self._pending_selection_id = None
         self.lines = scores.get("lines", []) or []
         self.games = scores.get("games", []) or []

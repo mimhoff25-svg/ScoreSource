@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Tuple
 import requests
 
 LINEUP_TTL = 60 * 60  # 1 hour
+EMPTY_LINEUP_TTL = 60 * 2  # Retry quickly when no lineup data was found.
+TEAM_MAP_TTL = 60 * 60 * 12
 
 ESPN_SPORT_PATH: Dict[str, str] = {
     "NBA": "basketball/nba",
@@ -25,6 +27,7 @@ DEPTHCHART_ORDER: Dict[str, List[str]] = {
 
 _session = requests.Session()
 _lineup_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
+_team_map_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
 
 
 def apply_starting_lineups(sport: str, home: Dict[str, Any], away: Dict[str, Any]) -> None:
@@ -42,29 +45,157 @@ def get_starting_lineup(sport: str, team_id: str | None, tricode: str | None = N
     sp = (sport or "").upper()
     tid = str(team_id or "").strip()
     tri = (tricode or "").upper()
-    key_id = tid or tri
+    path = ESPN_SPORT_PATH.get(sp)
+    if not path:
+        return []
+
+    lookup_candidates = _team_lookup_candidates(path, sp, tid, tri)
+    key_id = lookup_candidates[0] if lookup_candidates else ""
     if not key_id:
         return []
     cache_key = (sp, key_id)
     now = time.monotonic()
     cached = _lineup_cache.get(cache_key)
-    if cached and now - cached[0] < LINEUP_TTL:
-        return cached[1]
+    if cached:
+        cached_lineup = cached[1]
+        ttl = LINEUP_TTL if cached_lineup else EMPTY_LINEUP_TTL
+        if now - cached[0] < ttl:
+            return cached_lineup
 
-    path = ESPN_SPORT_PATH.get(sp)
-    if not path:
-        _lineup_cache[cache_key] = (now, [])
-        return []
-
-    lineup = _fetch_depthchart_lineup(path, sp, tid) if tid else []
-    if not lineup and tri and tri != tid:
-        lineup = _fetch_depthchart_lineup(path, sp, tri)
+    lineup: List[Dict[str, Any]] = []
+    for candidate in lookup_candidates:
+        lineup = _fetch_depthchart_lineup(path, sp, candidate)
+        if lineup:
+            break
     if not lineup:
-        lineup = _fetch_roster_lineup(path, sp, tid) if tid else []
-        if not lineup and tri and tri != tid:
-            lineup = _fetch_roster_lineup(path, sp, tri)
+        for candidate in lookup_candidates:
+            lineup = _fetch_roster_lineup(path, sp, candidate)
+            if lineup:
+                break
     _lineup_cache[cache_key] = (now, lineup)
     return lineup
+
+
+def _team_lookup_candidates(path: str, sport: str, team_id: str, tricode: str) -> List[str]:
+    candidates: List[str] = []
+
+    def add(value: str) -> None:
+        token = str(value or "").strip()
+        if not token or token in candidates:
+            return
+        candidates.append(token)
+
+    if _is_valid_team_lookup_token(team_id):
+        add(team_id)
+    mapped_id = _team_id_for_tricode(path, sport, tricode)
+    if mapped_id:
+        add(mapped_id)
+    if tricode:
+        add(tricode)
+    return candidates
+
+
+def _is_valid_team_lookup_token(value: str) -> bool:
+    token = str(value or "").strip().upper()
+    return token not in {"", "0", "AWY", "HOM"}
+
+
+def _team_id_for_tricode(path: str, sport: str, tricode: str) -> str:
+    tri = str(tricode or "").strip().upper()
+    if not tri:
+        return ""
+    now = time.monotonic()
+    cached = _team_map_cache.get(path)
+    if cached and now - cached[0] < TEAM_MAP_TTL:
+        return _team_id_from_map(sport, tri, cached[1])
+
+    payload = _fetch_json(f"https://site.api.espn.com/apis/site/v2/sports/{path}/teams") or {}
+    mapped: Dict[str, str] = {}
+    for sport_entry in payload.get("sports") or []:
+        if not isinstance(sport_entry, dict):
+            continue
+        for league_entry in sport_entry.get("leagues") or []:
+            if not isinstance(league_entry, dict):
+                continue
+            for team_entry in league_entry.get("teams") or []:
+                _store_team_mapping(mapped, sport, team_entry)
+    if not mapped:
+        for team_entry in payload.get("teams") or []:
+            _store_team_mapping(mapped, sport, team_entry)
+    if mapped:
+        _team_map_cache[path] = (now, mapped)
+        return _team_id_from_map(sport, tri, mapped)
+    if cached and now - cached[0] < (TEAM_MAP_TTL * 2):
+        return _team_id_from_map(sport, tri, cached[1])
+    return ""
+
+
+def _store_team_mapping(mapped: Dict[str, str], sport: str, team_entry: Any) -> None:
+    if not isinstance(team_entry, dict):
+        return
+    team_data = team_entry.get("team") if isinstance(team_entry.get("team"), dict) else team_entry
+    if not isinstance(team_data, dict):
+        return
+    key = str(team_data.get("abbreviation") or "").strip().upper()
+    value = str(team_data.get("id") or "").strip()
+    if not key or not value:
+        return
+    mapped[key] = value
+    alias = _team_tricode_alias(sport, key)
+    if alias:
+        mapped[alias] = value
+
+
+def _team_id_from_map(sport: str, tricode: str, mapped: Dict[str, str]) -> str:
+    candidates = [tricode]
+    alias = _team_tricode_alias(sport, tricode)
+    if alias:
+        candidates.append(alias)
+    seen: set[str] = set()
+    for candidate in candidates:
+        token = str(candidate or "").strip().upper()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        mapped_id = str(mapped.get(token) or "")
+        if mapped_id:
+            return mapped_id
+    return ""
+
+
+def _team_tricode_alias(sport: str, tricode: str) -> str:
+    tri = str(tricode or "").strip().upper()
+    if not tri:
+        return ""
+    aliases = {
+        "NBA": {
+            "GS": "GSW",
+            "GSW": "GS",
+            "NO": "NOP",
+            "NOP": "NO",
+            "NY": "NYK",
+            "NYK": "NY",
+            "SA": "SAS",
+            "SAS": "SA",
+            "WAS": "WSH",
+            "WSH": "WAS",
+            "UTA": "UTAH",
+            "UTAH": "UTA",
+        },
+        "NHL": {
+            "LA": "LAK",
+            "LAK": "LA",
+            "NJ": "NJD",
+            "NJD": "NJ",
+            "SJ": "SJS",
+            "SJS": "SJ",
+            "TB": "TBL",
+            "TBL": "TB",
+            "UTA": "UTAH",
+            "UTAH": "UTA",
+        },
+    }
+    return aliases.get(str(sport or "").upper(), {}).get(tri, "")
 
 
 def _fetch_json(url: str) -> Dict[str, Any] | None:
@@ -192,6 +323,8 @@ def _roster_lineup_for_sport(
         return _roster_lineup_nba(items)
     if sport == "MLB":
         return _roster_lineup_mlb(items)
+    if sport == "MLS":
+        return _roster_lineup_mls(items)
     return []
 
 
@@ -240,6 +373,16 @@ def _roster_lineup_mlb(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return _fill_with_remaining(lineup, items, 9)
 
 
+def _roster_lineup_mls(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Default to a 4-3-3 shape when match-specific XI is unavailable.
+    lineup = []
+    lineup += _take_from(_bucket(items, {"G", "GK"}), 1)
+    lineup += _take_from(_bucket(items, {"D", "DF", "DEF"}), 4)
+    lineup += _take_from(_bucket(items, {"M", "MF", "MID"}), 3)
+    lineup += _take_from(_bucket(items, {"F", "FW", "ST", "ATT"}), 3)
+    return _fill_with_remaining(lineup, items, 11)
+
+
 def _roster_lineup_football(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     lineup = []
     lineup += _take_from(_bucket(items, {"QB"}), 1)
@@ -263,8 +406,11 @@ def _bucket(items: List[Dict[str, Any]], positions: set[str]) -> List[Dict[str, 
 
 
 def _position_abbr(item: Dict[str, Any]) -> str:
-    pos = item.get("position") or {}
-    abbr = pos.get("abbreviation") or pos.get("shortName") or pos.get("displayName")
+    pos = item.get("position")
+    if isinstance(pos, dict):
+        abbr = pos.get("abbreviation") or pos.get("shortName") or pos.get("displayName")
+    else:
+        abbr = pos
     return str(abbr or "").upper()
 
 
@@ -294,4 +440,10 @@ def _lineup_entry_from_athlete(athlete: Dict[str, Any], position_override: str |
         name = f"{first} {last}".strip()
     pos_abbr = position_override or _position_abbr(athlete)
     jersey = athlete.get("jersey") or athlete.get("jerseyNumber") or athlete.get("jerseyNum") or ""
-    return {"fullName": name or "", "position": pos_abbr or "", "jersey": str(jersey or "")}
+    athlete_id = athlete.get("id") or athlete.get("alternateId") or ""
+    return {
+        "id": str(athlete_id or ""),
+        "fullName": name or "",
+        "position": pos_abbr or "",
+        "jersey": str(jersey or ""),
+    }

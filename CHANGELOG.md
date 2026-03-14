@@ -159,11 +159,22 @@ Initial league focus: NBA
 ---
 
 ## [Unreleased]
-### Planned
-- Multi-league support (NFL, NHL, CFB).
-- Animated score-change cues.
-- Web-based configuration panel.
-- Integration with broader ScoreSource backend modules.
+### Added
+- Cross-sport player cards now include condensed sport-aware profile fields, game stats, and career stats in a single compact layout.
+- Team logos now render on the opposite side of the player headshot in the player-card hero row.
+- Roster lineup entries preserve athlete ids so player-card lookups can target the correct profile.
+- Added regression tests for player-profile disambiguation, lineup team-id recovery, and missing-headshot fallbacks.
+
+### Changed
+- Player-card headshots are larger and the surrounding layout is denser so the card stays inside the scoreboard bounds.
+- The card no longer shows `Profile loaded from API`.
+- Profile fetching now prefers full names plus jersey-aware matching to disambiguate duplicate names such as the Curry brothers.
+- Team-id resolution now uses sport-aware tricode aliases when ESPN feeds return placeholder ids like `0`, `AWY`, or `HOM`.
+
+### Fixed
+- Prevented team logos from appearing in the player headshot slot when a real player photo is unavailable.
+- Fixed NBA player-card mismatches caused by abbreviated lineup names and same-initial/same-last-name roster entries.
+- Fixed several non-NBA card-photo failures by resolving roster team ids from tricodes before fetching profile data.
 
 ---
 
