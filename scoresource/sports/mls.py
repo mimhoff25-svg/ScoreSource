@@ -14,6 +14,7 @@ from ..common.timefmt import format_start_time
 
 SPORT = "mls"
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard"
+SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/summary?event={game_id}"
 
 
 def _env_float(name: str, default: float, *, min_value: float | None = None) -> float:
@@ -166,14 +167,63 @@ def safe_score(team: Dict[str, Any]) -> int:
         return int(val or 0)
 
 
+def _game_status_int_from_value(value: Any) -> int:
+    if isinstance(value, int):
+        if value in (1, 2, 3):
+            return value
+        return 2
+    text = str(value or "").strip().lower()
+    if text in ("final", "post"):
+        return 3
+    if text in ("upcoming", "pre", "scheduled"):
+        return 1
+    if text in ("live", "in", "in_progress"):
+        return 2
+    return 2
+
+
+def _coerce_cached_game_shape(game: Dict[str, Any]) -> Dict[str, Any]:
+    # Accept cache data written by either canonical or normalized MLS paths.
+    status_int = _game_status_int_from_value(game.get("gameStatus") if "gameStatus" in game else game.get("status"))
+    period = game.get("period")
+    if isinstance(period, int):
+        period = {"current": period} if period else {}
+    elif not isinstance(period, dict):
+        period = {}
+    status_text = game.get("gameStatusText") or game.get("header") or ""
+    return {
+        **game,
+        "gameStatus": status_int,
+        "gameStatusText": status_text,
+        "period": period,
+        "gameClockText": game.get("gameClockText") or (game.get("gameClock") if isinstance(game.get("gameClock"), str) else ""),
+        "gameTimeUTC": game.get("gameTimeUTC") or game.get("startTime") or game.get("date"),
+    }
+
+
+def _coerce_cached_scoreboard_shape(payload: Dict[str, Any]) -> Dict[str, Any]:
+    games = payload.get("games")
+    if not isinstance(games, list):
+        return payload
+    normalized_games: List[Dict[str, Any]] = []
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        normalized_games.append(_coerce_cached_game_shape(game))
+    return {"games": normalized_games, "lines": payload.get("lines") or []}
+
+
 def _extract_start_time_text(g: Dict[str, Any]) -> str:
+    from ..common.timefmt import format_start_time, normalize_espn_time_str
     status_text = (g.get("gameStatusText") or g.get("statusText") or "").strip()
     iso_val = g.get("gameTimeUTC") or g.get("startTime") or g.get("date")
     formatted = format_start_time(iso_val)
     if formatted != "Starts TBA":
         return formatted
-    if status_text and any(am_pm in status_text.upper() for am_pm in ("AM", "PM")):
-        return status_text
+    if status_text and any(x in status_text.upper() for x in ("AM", "PM")):
+        normalized = normalize_espn_time_str(status_text)
+        if normalized:
+            return normalized
     return status_text or "Scheduled"
 
 
@@ -209,6 +259,317 @@ def _period_label(period: int | None, status_text: str | None) -> str:
     if period and period > 2:
         return "ET"
     return ""
+
+
+def _coerce_number(value: Any) -> int | float | str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except Exception:
+        return text
+    if number.is_integer():
+        return int(number)
+    return number
+
+
+def _record_summary(records: Any) -> str:
+    if not isinstance(records, list):
+        return ""
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        summary = rec.get("summary") or rec.get("displayValue") or rec.get("shortDisplayName")
+        if isinstance(summary, str) and summary.strip():
+            return summary.strip()
+    return ""
+
+
+def _record_tuple(summary: str | None) -> tuple[int, int, int | None] | None:
+    if not summary:
+        return None
+    parts = re.findall(r"\d+", str(summary))
+    if len(parts) < 2:
+        return None
+    try:
+        wins = int(parts[0])
+        losses = int(parts[1])
+        draws = int(parts[2]) if len(parts) >= 3 else None
+    except Exception:
+        return None
+    return wins, losses, draws
+
+
+def _set_record_fields(mapped: Dict[str, Any], summary: str) -> None:
+    if not summary:
+        return
+    mapped["record"] = summary
+    mapped["recordSummary"] = summary
+    record_tuple = _record_tuple(summary)
+    if not record_tuple:
+        return
+    mapped["wins"] = record_tuple[0]
+    mapped["losses"] = record_tuple[1]
+    if record_tuple[2] is not None:
+        mapped["draws"] = record_tuple[2]
+        mapped["ties"] = record_tuple[2]
+
+
+def _team_logo(team: Dict[str, Any]) -> str:
+    logos = team.get("logos")
+    if isinstance(logos, list):
+        for entry in logos:
+            href = entry.get("href") if isinstance(entry, dict) else None
+            if href:
+                return str(href)
+    return str(team.get("logo") or "")
+
+
+def _apply_team_identity(target: Dict[str, Any], team: Dict[str, Any]) -> None:
+    if not isinstance(team, dict):
+        return
+    tri = (team.get("abbreviation") or team.get("shortDisplayName") or target.get("teamTricode") or "TM").upper()
+    tid = str(team.get("id") or target.get("teamId") or "")
+    primary, secondary = _register_team_colors(tri, team)
+    target["teamId"] = tid
+    target["teamName"] = team.get("displayName") or team.get("name") or target.get("teamName") or "Team"
+    target["teamTricode"] = tri
+    target["teamCity"] = team.get("location") or target.get("teamCity") or target.get("teamName") or ""
+    target["nickname"] = team.get("nickname") or team.get("shortDisplayName") or target.get("nickname") or ""
+    if primary:
+        target["teamColor"] = primary
+    if secondary:
+        target["teamAltColor"] = secondary
+    logo = _team_logo(team)
+    if logo:
+        target["teamLogo"] = logo
+        _logo_url_map[tid or tri] = logo
+        _logo_url_map[tri] = logo
+
+
+def _apply_team_statistics(target: Dict[str, Any], stats: Any) -> None:
+    if not isinstance(stats, list):
+        return
+    stat_map: Dict[str, Any] = dict(target.get("statistics") or {})
+    for entry in stats:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        raw = entry.get("displayValue")
+        if raw in (None, ""):
+            raw = entry.get("value")
+        value = _coerce_number(raw)
+        stat_map[name] = value
+    if "shotsOnGoal" not in stat_map and "shotsOnTarget" in stat_map:
+        stat_map["shotsOnGoal"] = stat_map["shotsOnTarget"]
+    if "shots" not in stat_map and "totalShots" in stat_map:
+        stat_map["shots"] = stat_map["totalShots"]
+    target["statistics"] = stat_map
+    for key in (
+        "shotsOnGoal",
+        "shotsOnTarget",
+        "shots",
+        "totalShots",
+        "yellowCards",
+        "redCards",
+        "wonCorners",
+        "offsides",
+        "possessionPct",
+        "goalAssists",
+        "goalsConceded",
+        "saves",
+    ):
+        if key in stat_map:
+            target[key] = stat_map[key]
+
+
+def _player_stat_map(stats: Any) -> Dict[str, Any]:
+    stat_map: Dict[str, Any] = {}
+    if not isinstance(stats, list):
+        return stat_map
+    for entry in stats:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        raw = entry.get("displayValue")
+        if raw in (None, ""):
+            raw = entry.get("value")
+        stat_map[name] = _coerce_number(raw)
+    return stat_map
+
+
+def _roster_sort_key(player: Dict[str, Any]) -> tuple[int, int, int, int, str]:
+    starter_rank = 0 if player.get("starter") else 1
+    active_rank = 0 if player.get("active", True) else 1
+    formation_place = player.get("formationPlace")
+    try:
+        formation_rank = int(str(formation_place).strip())
+    except Exception:
+        formation_rank = 999
+    sub_rank = 0 if player.get("subbedIn") else 1
+    athlete = player.get("athlete") if isinstance(player.get("athlete"), dict) else {}
+    name = str(
+        player.get("fullName")
+        or player.get("displayName")
+        or athlete.get("fullName")
+        or athlete.get("displayName")
+        or ""
+    )
+    return starter_rank, formation_rank, sub_rank, active_rank, name
+
+
+def _map_roster_player(entry: Dict[str, Any]) -> Dict[str, Any]:
+    athlete = entry.get("athlete") if isinstance(entry.get("athlete"), dict) else {}
+    position = entry.get("position")
+    if isinstance(position, dict):
+        position_abbr = position.get("abbreviation") or position.get("shortDisplayName") or position.get("displayName")
+    else:
+        position_abbr = position
+    stats = _player_stat_map(entry.get("stats"))
+    mapped = {
+        "id": str(athlete.get("id") or ""),
+        "playerId": str(athlete.get("id") or ""),
+        "athleteId": str(athlete.get("id") or ""),
+        "athlete": athlete,
+        "displayName": athlete.get("displayName") or athlete.get("shortName") or "",
+        "fullName": athlete.get("fullName") or athlete.get("displayName") or "",
+        "familyName": athlete.get("lastName") or "",
+        "jerseyNum": str(entry.get("jersey") or ""),
+        "jersey": str(entry.get("jersey") or ""),
+        "position": str(position_abbr or ""),
+        "statistics": stats,
+        "starter": bool(entry.get("starter")),
+        "subbedIn": bool(entry.get("subbedIn")),
+        "subbedOut": bool(entry.get("subbedOut")),
+        "active": bool(entry.get("active", True)),
+        "formationPlace": entry.get("formationPlace"),
+    }
+    headshot = athlete.get("headshot") if isinstance(athlete.get("headshot"), dict) else {}
+    if headshot.get("href"):
+        mapped["headshotUrl"] = headshot.get("href")
+    return mapped
+
+
+def _apply_roster_team(target: Dict[str, Any], roster_entry: Dict[str, Any]) -> None:
+    if not isinstance(roster_entry, dict):
+        return
+    _apply_team_identity(target, roster_entry.get("team") or {})
+    formation = roster_entry.get("formation")
+    if formation:
+        target["formation"] = str(formation)
+    roster = roster_entry.get("roster")
+    if not isinstance(roster, list) or not roster:
+        return
+    players = [_map_roster_player(entry) for entry in roster if isinstance(entry, dict)]
+    players = [player for player in players if player.get("playerId") or player.get("fullName") or player.get("displayName")]
+    if not players:
+        return
+    players.sort(key=_roster_sort_key)
+    target["players"] = players
+    starters = [player for player in players if player.get("starter")]
+    if starters:
+        target["startingLineup"] = starters
+
+
+def _summary_status_payload(
+    comp: Dict[str, Any],
+    fallback_game: Dict[str, Any] | None = None,
+) -> tuple[int, str, int | None, Any, str]:
+    fallback_game = fallback_game or {}
+    status = comp.get("status") if isinstance(comp, dict) else {}
+    status_type = status.get("type") if isinstance(status, dict) else {}
+    state = str(status_type.get("state") or "").strip().lower()
+    detail = str(status_type.get("shortDetail") or status_type.get("detail") or "").strip()
+    period = status.get("period")
+    if period is None:
+        fallback_period = fallback_game.get("period")
+        if isinstance(fallback_period, dict):
+            period = fallback_period.get("current")
+        elif isinstance(fallback_period, int):
+            period = fallback_period
+    if period is None:
+        period = _period_from_status(detail)
+    clock_display = str(
+        status.get("displayClock")
+        or status_type.get("statusPrimary")
+        or fallback_game.get("gameClockText")
+        or ""
+    )
+    clock = status.get("clock")
+    if clock in (None, ""):
+        clock = fallback_game.get("gameClock")
+    if clock in (None, ""):
+        clock = clock_display
+    if state == "pre":
+        status_int = 1
+        status_text = _extract_start_time_text(
+            {
+                "date": comp.get("date") or fallback_game.get("gameTimeUTC"),
+                "gameStatusText": detail,
+            }
+        )
+        clock = ""
+        clock_display = ""
+    elif state == "post":
+        status_int = 3
+        status_text = detail or "FT"
+        clock = ""
+        clock_display = ""
+    else:
+        status_int = 2
+        lowered = detail.lower()
+        if lowered in ("ht", "halftime", "half time"):
+            status_text = "HT"
+            clock = ""
+            clock_display = ""
+        else:
+            status_text = detail or clock_display or format_clock(clock) or "Live"
+    return status_int, status_text, period, clock, clock_display
+
+
+def _merge_summary_team(base: Dict[str, Any], comp_entry: Dict[str, Any] | None, box_entry: Dict[str, Any] | None) -> Dict[str, Any]:
+    team = dict(base or {})
+    if isinstance(comp_entry, dict):
+        _apply_team_identity(team, comp_entry.get("team") or {})
+        summary = _record_summary(comp_entry.get("records"))
+        if summary:
+            _set_record_fields(team, summary)
+        score = comp_entry.get("score")
+        if score not in (None, ""):
+            try:
+                team["score"] = int(score)
+            except Exception:
+                team["score"] = safe_score({"score": score})
+        if comp_entry.get("winner") is not None:
+            team["winner"] = bool(comp_entry.get("winner"))
+        form = comp_entry.get("form")
+        if form:
+            team["form"] = form
+        _apply_team_statistics(team, comp_entry.get("statistics"))
+    if isinstance(box_entry, dict):
+        _apply_team_identity(team, box_entry.get("team") or {})
+        _apply_team_statistics(team, box_entry.get("statistics"))
+    team.setdefault("players", [])
+    return team
+
+
+def _fetch_summary_payload(game_id: str) -> Dict[str, Any] | None:
+    try:
+        resp = _logo_session.get(SUMMARY_URL.format(game_id=game_id), timeout=SCOREBOARD_TIMEOUT_SEC)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _load_json(path: Path) -> Any:
@@ -310,21 +671,19 @@ def _map_team(comp: Dict[str, Any], side: str) -> Dict[str, Any]:
     raw = next((c for c in competitors if c.get("homeAway") == side), {})
     team = raw.get("team", {}) or {}
     tri = (team.get("abbreviation") or team.get("shortDisplayName") or "TM").upper()
-    tid = str(team.get("id") or "")
-    primary, secondary = _register_team_colors(tri, team)
-    logo = team.get("logo") or ((team.get("logos") or [{}])[0]).get("href")
-    if logo:
-        _logo_url_map[tid or tri] = logo
-        _logo_url_map[tri] = logo
-    return {
-        "teamId": tid,
+    mapped: Dict[str, Any] = {
+        "teamId": str(team.get("id") or ""),
         "teamName": team.get("displayName") or team.get("name") or "Team",
         "teamTricode": tri,
-        "score": int(raw.get("score") or 0),
-        "teamColor": primary,
-        "teamAltColor": secondary,
+        "score": safe_score(raw),
         "players": [],
     }
+    _apply_team_identity(mapped, team)
+    summary = _record_summary(raw.get("records"))
+    if summary:
+        _set_record_fields(mapped, summary)
+    _apply_team_statistics(mapped, raw.get("statistics"))
+    return mapped
 
 
 def _build_line(g: Dict[str, Any]) -> str:
@@ -338,10 +697,6 @@ def _build_line(g: Dict[str, Any]) -> str:
 
 def fetch_scores() -> Dict[str, Any]:
     now = time.monotonic()
-    disk = None
-    if _scoreboard_cache.get("data") is None:
-        disk = _load_disk_scoreboard()
-
     cached = _scoreboard_cache.get("data")
     if cached and now - _scoreboard_cache.get("ts", 0) < SCOREBOARD_TTL:
         return cached
@@ -351,11 +706,15 @@ def fetch_scores() -> Dict[str, Any]:
         resp.raise_for_status()
         data = resp.json()
     except Exception:
+        disk = _load_disk_scoreboard()
         if disk:
-            _seed_colors_from_games(disk.get("games", []) or [])
-            _scoreboard_cache["data"] = disk
+            result = _coerce_cached_scoreboard_shape(disk)
+            _seed_colors_from_games(result.get("games", []) or [])
+            _scoreboard_cache["data"] = result
             _scoreboard_cache["ts"] = now
-            return disk
+            return result
+        if cached:
+            return cached
         return {"games": [], "lines": ["No matches scheduled."]}
 
     events = data.get("events", []) or []
@@ -366,7 +725,10 @@ def fetch_scores() -> Dict[str, Any]:
         status_type = status.get("type") or {}
         state = status_type.get("state")
         period = status.get("period")
-        clock = status.get("displayClock") or status.get("clock")
+        clock_display = status.get("displayClock") or ""
+        clock = status.get("clock")
+        if clock in (None, ""):
+            clock = clock_display
         start_time = ev.get("date")
         status_text_raw = status_type.get("shortDetail") or status_type.get("detail")
         if period is None:
@@ -377,17 +739,22 @@ def fetch_scores() -> Dict[str, Any]:
         if state == "pre":
             game_status = 1
             status_text = _extract_start_time_text({"date": start_time, "gameStatusText": status_text_raw})
+            clock = ""
+            clock_display = ""
         elif state == "post":
             game_status = 3
             status_text = status_text_raw or "Final"
+            clock = ""
+            clock_display = ""
         else:
             game_status = 2
             lowered = (status_text_raw or "").lower()
             if lowered in ("ht", "halftime", "half time"):
-                status_text = "Halftime"
+                status_text = "HT"
+                clock = ""
+                clock_display = ""
             else:
-                label = _period_label(period, status_text_raw)
-                status_text = status_text_raw or (f"{label} {clock}".strip() if (label or clock) else "Live")
+                status_text = status_text_raw or clock_display or "Live"
 
         game = {
             "gameId": str(ev.get("id")),
@@ -397,6 +764,7 @@ def fetch_scores() -> Dict[str, Any]:
             "gameStatusText": status_text,
             "period": {"current": period} if period else {},
             "gameClock": clock,
+            "gameClockText": clock_display,
             "gameTimeUTC": start_time,
             "seasonYear": str(ev.get("season", {}).get("year") or "2025"),
         }
@@ -415,11 +783,11 @@ def _build_header(game: Dict[str, Any]) -> str:
     status_value = game.get("gameStatus")
     period = game.get("period") or {}
     current = period.get("current") if isinstance(period, dict) else period
-    clock = format_clock(game.get("gameClock"))
+    clock = game.get("gameClockText") or format_clock(game.get("gameClock"))
     status_text = (game.get("gameStatusText") or "").strip()
 
-    if status_value == 3 and status_text:
-        return status_text
+    if status_value == 3:
+        return status_text or "Final"
     if status_value in (None, 0, 1) or not current:
         return _extract_start_time_text(game)
     label = _period_label(current if isinstance(current, int) else None, status_text)
@@ -432,9 +800,52 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
     if cached and now - cached[0] < BOXSCORE_TTL:
         return cached[1]
 
-    board = _scoreboard_cache.get("data") or _load_disk_scoreboard() or fetch_scores()
+    board = _scoreboard_cache.get("data") or fetch_scores()
     games = board.get("games", []) if isinstance(board, dict) else []
     game = next((g for g in games if str(g.get("gameId")) == str(game_id)), None)
+    summary = _fetch_summary_payload(game_id)
+    if summary:
+        comp = ((summary.get("header") or {}).get("competitions") or [{}])[0]
+        boxscore = summary.get("boxscore") or {}
+        team_entries = boxscore.get("teams") or []
+        home_comp = next((entry for entry in (comp.get("competitors") or []) if entry.get("homeAway") == "home"), None)
+        away_comp = next((entry for entry in (comp.get("competitors") or []) if entry.get("homeAway") == "away"), None)
+        home_box = next((entry for entry in team_entries if entry.get("homeAway") == "home"), None)
+        away_box = next((entry for entry in team_entries if entry.get("homeAway") == "away"), None)
+        home = _merge_summary_team((game or {}).get("homeTeam", {}), home_comp, home_box)
+        away = _merge_summary_team((game or {}).get("awayTeam", {}), away_comp, away_box)
+        for roster_entry in summary.get("rosters") or []:
+            if not isinstance(roster_entry, dict):
+                continue
+            side = roster_entry.get("homeAway")
+            if side == "home":
+                _apply_roster_team(home, roster_entry)
+            elif side == "away":
+                _apply_roster_team(away, roster_entry)
+        game_payload = dict(game or {})
+        status_int, status_text, period, clock, clock_text = _summary_status_payload(comp, game or {})
+        game_payload.update(
+            {
+                "gameId": str(comp.get("id") or game_id),
+                "gameStatus": status_int,
+                "gameStatusText": status_text,
+                "period": {"current": period} if period else {},
+                "gameClock": clock,
+                "gameClockText": clock_text,
+                "gameTimeUTC": comp.get("date") or game.get("gameTimeUTC"),
+            }
+        )
+        header = _build_header(game_payload)
+        result = {
+            "game": game_payload,
+            "home": home,
+            "away": away,
+            "header": header,
+            "shotclock": "--",
+        }
+        _boxscore_cache[game_id] = (now, result)
+        _save_disk_boxscore(game_id, result)
+        return result
     if game:
         header = _build_header(game)
         result = {
@@ -465,7 +876,62 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
 
 
 def build_player_rows(team: Dict[str, Any]) -> List[List[str]]:
-    return []
+    rows: List[List[str]] = []
+    players = team.get("players") or []
+    if isinstance(players, list) and players:
+        for player in sorted((entry for entry in players if isinstance(entry, dict)), key=_roster_sort_key):
+            stats = player.get("statistics") if isinstance(player.get("statistics"), dict) else {}
+            athlete = player.get("athlete") if isinstance(player.get("athlete"), dict) else {}
+            name = (
+                player.get("fullName")
+                or player.get("displayName")
+                or athlete.get("fullName")
+                or athlete.get("displayName")
+                or athlete.get("shortName")
+                or ""
+            )
+            jersey = str(player.get("jerseyNum") or player.get("jersey") or "")
+            position = str(player.get("position") or "")
+            goals = stats.get("totalGoals", 0)
+            assists = stats.get("goalAssists", 0)
+            shots_on_target = stats.get("shotsOnTarget", 0)
+            yellow_cards = stats.get("yellowCards", 0)
+            red_cards = stats.get("redCards", 0)
+            rows.append(
+                [
+                    jersey,
+                    str(name),
+                    position,
+                    str(goals),
+                    str(assists),
+                    str(shots_on_target),
+                    str(yellow_cards),
+                    str(red_cards),
+                ]
+            )
+        if rows:
+            return rows
+
+    lineup = team.get("startingLineup") or []
+    if isinstance(lineup, list):
+        for player in lineup:
+            if not isinstance(player, dict):
+                continue
+            athlete = player.get("athlete") if isinstance(player.get("athlete"), dict) else {}
+            name = (
+                player.get("fullName")
+                or player.get("displayName")
+                or athlete.get("fullName")
+                or athlete.get("displayName")
+                or athlete.get("shortName")
+                or ""
+            )
+            jersey = str(player.get("jerseyNum") or player.get("jersey") or "")
+            position = str(player.get("position") or "")
+            if not (name or jersey or position):
+                continue
+            rows.append([jersey, str(name), position, "", "", "", "", ""])
+    return rows
 
 
 # Compatibility wrappers expected by the test-suite / external callers
@@ -474,9 +940,18 @@ def _normalize_game_for_tests(g: Dict[str, Any]) -> Dict[str, Any]:
     away = (g.get("awayTeam") or {}) or {}
     game_id = str(g.get("gameId") or g.get("id") or "")
     start_time = g.get("gameTimeUTC") or g.get("startTime") or g.get("date")
-    period = g.get("period") or {}
-    clock = format_clock(g.get("gameClock") or g.get("clock"))
+    period_field = g.get("period")
+    if isinstance(period_field, dict):
+        period = period_field.get("current")
+    elif isinstance(period_field, int):
+        period = period_field
+    else:
+        period = None
+    clock = str(g.get("gameClockText") or format_clock(g.get("gameClock") or g.get("clock")))
     shot = format_shotclock(g.get("shotClock"))
+    status_value = g.get("gameStatus")
+    if status_value in (None, ""):
+        status_value = _game_status_int_from_value(g.get("status"))
     try:
         home_score = safe_score(home)
     except Exception:
@@ -489,7 +964,7 @@ def _normalize_game_for_tests(g: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "gameId": game_id,
         "sport": SPORT,
-        "status": g.get("gameStatus"),
+        "status": status_value,
         "home": home.get("teamName") or home.get("teamCity") or "Home",
         "away": away.get("teamName") or away.get("teamCity") or "Away",
         "homeTricode": home.get("teamTricode") or home.get("abbreviation") or "",

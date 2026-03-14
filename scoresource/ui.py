@@ -1363,6 +1363,7 @@ class PlayerCardDialog(QDialog):
         }
         order_map = {
             "NBA": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
+            "NCAA BASKETBALL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
             "NFL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
             "NCAA FOOTBALL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
             "NHL": ["No.", "Pos", "Ht", "Wt", "Age", "Shoots", "Born", "Status"],
@@ -1435,6 +1436,7 @@ class PlayerCardDialog(QDialog):
         sport = self._sport_code()
         preferred = {
             "NBA": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO", "+/-"],
+            "NCAA BASKETBALL": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO", "PF"],
             "NHL": ["G", "A", "PTS", "SOG", "PIM", "SV", "SV%"],
             "MLB": ["AVG", "OBP", "SLG", "OPS", "HR", "RBI", "R", "H", "AB", "BB", "SO", "SB"],
             "NFL": ["YDS", "TD", "TKL", "AST", "SACK", "INT", "REC", "CAR"],
@@ -1487,6 +1489,7 @@ class PlayerCardDialog(QDialog):
         sport = self._sport_code()
         preferred = {
             "NBA": ["GP", "PTS", "REB", "AST", "STL", "BLK", "FG%", "3P%", "FT%"],
+            "NCAA BASKETBALL": ["GP", "PTS", "REB", "AST", "STL", "BLK", "FG%", "3P%", "FT%"],
             "NFL": ["GP", "PASS YDS", "PASS TD", "INT", "RUSH YDS", "RUSH TD", "REC", "REC YDS", "REC TD", "TKL", "SACK"],
             "NCAA FOOTBALL": ["GP", "PASS YDS", "PASS TD", "INT", "RUSH YDS", "RUSH TD", "REC", "REC YDS", "REC TD", "TKL", "SACK"],
             "MLB": ["GP", "AVG", "HR", "RBI", "H", "OBP", "SLG", "OPS", "SB", "SO", "ERA", "W", "L", "SV"],
@@ -2669,6 +2672,8 @@ class ScoreSourceWindow(QMainWindow):
             return f"https://a.espncdn.com/i/teamlogos/mlb/500/{tri.lower()}.png"
         if sp == "MLS" and tid and tid not in {"0", "AWY", "HOM"}:
             return f"https://a.espncdn.com/i/teamlogos/soccer/500/{tid}.png"
+        if sp == "NCAA BASKETBALL" and tid and tid not in {"0", "AWY", "HOM"}:
+            return f"https://a.espncdn.com/i/teamlogos/ncaa/500/{tid}.png"
         if sp == "NCAA FOOTBALL" and tid and tid not in {"0", "AWY", "HOM"}:
             return f"https://a.espncdn.com/i/teamlogos/ncaa/500/{tid}.png"
         return ""
@@ -3183,21 +3188,40 @@ class ScoreSourceWindow(QMainWindow):
         return games[0].get("gameId"), 0
 
     def _group_games_for_combo(self, games: List[Dict[str, Any]]) -> list[tuple[str | None, List[Dict[str, Any]]]]:
-        if self.sport_name.upper() != "NCAA FOOTBALL":
-            return [(None, games)]
-        grouped: Dict[str, List[Dict[str, Any]]] = {}
-        for g in games:
-            label = g.get("division") or "Other"
-            grouped.setdefault(str(label), []).append(g)
-        if not grouped:
-            return [(None, games)]
-        ordered: list[tuple[str | None, List[Dict[str, Any]]]] = []
-        for label in ("FBS", "FCS", "Other"):
-            if label in grouped:
-                ordered.append((label, grouped.pop(label)))
-        for label in sorted(grouped):
-            ordered.append((label, grouped[label]))
-        return ordered
+        sport = self.sport_name.upper()
+        if sport == "NCAA FOOTBALL":
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for g in games:
+                label = g.get("division") or "Other"
+                grouped.setdefault(str(label), []).append(g)
+            if not grouped:
+                return [(None, games)]
+            ordered: list[tuple[str | None, List[Dict[str, Any]]]] = []
+            for label in ("FBS", "FCS", "Other"):
+                if label in grouped:
+                    ordered.append((label, grouped.pop(label)))
+            for label in sorted(grouped):
+                ordered.append((label, grouped[label]))
+            return ordered
+        if sport == "NCAA BASKETBALL":
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for g in games:
+                label = (
+                    g.get("eventBucket")
+                    or g.get("groupShortName")
+                    or g.get("groupName")
+                    or ("March Madness" if g.get("isMarchMadness") else "NCAA Basketball")
+                )
+                grouped.setdefault(str(label), []).append(g)
+            if len(grouped) <= 1:
+                return [(None, games)]
+            ordered: list[tuple[str | None, List[Dict[str, Any]]]] = []
+            if "March Madness" in grouped:
+                ordered.append(("March Madness", grouped.pop("March Madness")))
+            for label in sorted(grouped):
+                ordered.append((label, grouped[label]))
+            return ordered
+        return [(None, games)]
 
     def _add_combo_header(self, label: str) -> None:
         if not label:
@@ -3282,7 +3306,7 @@ class ScoreSourceWindow(QMainWindow):
                         status_state = "upcoming"
                     else:
                         status_state = "live" if lowered else "upcoming"
-                start_time = g.get("startTime")
+                start_time = g.get("startTime") or g.get("gameTimeUTC") or g.get("gameTime")
                 start_time_local = g.get("startTimeLocal")
                 if start_time:
                     formatted_start = iso_to_local(start_time)
@@ -3675,7 +3699,7 @@ class ScoreSourceWindow(QMainWindow):
         right_team = home
         left_side = "away"
         right_side = "home"
-        if self.sport_name.upper() == "NBA":
+        if self.sport_name.upper() in ("NBA", "NCAA BASKETBALL"):
             left_fouls = "BONUS" if self._team_in_bonus(left_team) else self._team_fouls_text(left_team)
             right_fouls = "BONUS" if self._team_in_bonus(right_team) else self._team_fouls_text(right_team)
             self.center_panel.set_bottom_labels(str(left_fouls), str(right_fouls), "FOULS")
@@ -3719,6 +3743,16 @@ class ScoreSourceWindow(QMainWindow):
                 self.center_panel.set_bottom_labels(
                     f"{left_shots}\n{left_pim}", f"{right_shots}\n{right_pim}", "SHOTS\nPIM"
                 )
+        elif self.sport_name.upper() == "MLS":
+            left_shots = self._team_shots_text(left_team)
+            right_shots = self._team_shots_text(right_team)
+            left_poss = self._team_stat_text(left_team, ("possessionPct",), suffix="%")
+            right_poss = self._team_stat_text(right_team, ("possessionPct",), suffix="%")
+            self.center_panel.set_bottom_labels(
+                f"{left_shots}\n{left_poss}",
+                f"{right_shots}\n{right_poss}",
+                "SOG\nPOSS",
+            )
         elif self.sport_name.upper() == "NFL":
             current_possession = (self._nfl_possession_tricode or "").upper()
             if current_possession != self._nfl_last_possession:
@@ -4672,6 +4706,7 @@ class ScoreSourceWindow(QMainWindow):
         sport = self.sport_name.upper()
         return {
             "NBA": 5,
+            "NCAA BASKETBALL": 5,
             "WNBA": 5,
             "NHL": 6,
             "MLB": 9,
@@ -4722,7 +4757,7 @@ class ScoreSourceWindow(QMainWindow):
         if self.sport_name.upper() == "MLB":
             status_text = self._mlb_arrow_status_text(status_text)
         status_state = self._normalize_status(game.get("status") or game.get("gameStatus"), status_text)
-        start_time = game.get("startTime")
+        start_time = game.get("startTime") or game.get("gameTimeUTC") or game.get("gameTime")
         start_time_local = game.get("startTimeLocal")
         if start_time:
             formatted_start = iso_to_local(start_time)
@@ -4759,7 +4794,7 @@ class ScoreSourceWindow(QMainWindow):
                 "home_score": home_score,
                 "status_text": status_text,
                 "status_state": status_state,
-                "startTime": game.get("startTime"),
+                "startTime": game.get("startTime") or game.get("gameTimeUTC") or game.get("gameTime"),
                 "startTimeLocal": start_time_local,
                 "away_tricode": (away_team.get("teamTricode") or away_team.get("tricode") or "").upper(),
                 "home_tricode": (home_team.get("teamTricode") or home_team.get("tricode") or "").upper(),
@@ -5155,12 +5190,13 @@ class ScoreSourceWindow(QMainWindow):
         """
         prev = self._clock_state or {}
         sport = self.sport_name.upper()
+        count_up = sport == "MLS"
         prev_raw = prev.get("raw_secs")
         period_changed = prev.get("period") not in (None, period_text)
         buffer = self.clock_buffer_sec if buffer_sec is None else buffer_sec
         stale_window_default = self.clock_feed_stale_sec if stale_window_sec is None else stale_window_sec
 
-        # Consider the clock "running" only when the raw feed is moving downward
+        # Count-down sports decrease the raw clock; MLS increases elapsed time.
         raw_running = False
         clock_running = False
         now = time.monotonic()
@@ -5172,10 +5208,10 @@ class ScoreSourceWindow(QMainWindow):
         elif period_changed or prev_raw is None:
             raw_running = True
         else:
-            delta_raw = prev_raw - raw_secs
+            delta_raw = (raw_secs - prev_raw) if count_up else (prev_raw - raw_secs)
             if delta_raw > 0.05:
                 raw_running = True
-            elif raw_secs - prev_raw > 30:  # large jump (new period / reset)
+            elif ((prev_raw - raw_secs) if count_up else (raw_secs - prev_raw)) > 30:
                 raw_running = True
             else:
                 raw_running = False
@@ -5196,27 +5232,40 @@ class ScoreSourceWindow(QMainWindow):
                 if sport == "NBA":
                     synthetic_window = min(stale_window, 2.0)
                 elif sport == "NHL":
-                    synthetic_window = min(stale_window, 1.25)
+                    synthetic_window = min(stale_window, 3.0)
+                elif sport == "MLS":
+                    synthetic_window = min(stale_window, 8.0)
                 else:
                     synthetic_window = min(stale_window, 4.0)
-                if prev.get("raw_running") and (now - last_feed_ts) <= synthetic_window:
+                if (prev.get("running") or prev.get("raw_running")) and (now - last_feed_ts) <= synthetic_window:
                     clock_running = True
             if sport == "NHL" and raw_secs <= 0.1:
                 clock_running = False
+            elif sport == "MLS":
+                # Soccer clocks count up continuously while the period is active even
+                # if ESPN leaves the raw clock unchanged for long stretches.
+                clock_running = True
 
         clock_secs = None
         if raw_secs is not None:
-            clock_secs = max(0.0, raw_secs - buffer)
+            clock_secs = max(0.0, raw_secs + buffer) if count_up else max(0.0, raw_secs - buffer)
             # If the feed isn't moving, hold at the lowest seen value to avoid flicker
             if not clock_running and prev.get("clock_secs") is not None and not period_changed:
-                clock_secs = min(prev["clock_secs"], clock_secs)
+                if count_up:
+                    clock_secs = max(prev["clock_secs"], clock_secs)
+                else:
+                    clock_secs = min(prev["clock_secs"], clock_secs)
             # Prevent small upward jumps that cause the display to bounce (ex: 5:59 -> 6:00 -> 5:59).
             prev_clock_secs = prev.get("clock_secs")
             if prev_clock_secs is not None and not period_changed:
                 raw_jump = False
-                if prev_raw is not None and raw_secs is not None and (raw_secs - prev_raw) > 30:
+                if prev_raw is not None and raw_secs is not None and (
+                    ((prev_raw - raw_secs) if count_up else (raw_secs - prev_raw)) > 30
+                ):
                     raw_jump = True
-                if not raw_jump and clock_secs > (prev_clock_secs + 0.05):
+                if count_up and not raw_jump and clock_secs < (prev_clock_secs - 0.05):
+                    clock_secs = prev_clock_secs
+                elif not count_up and not raw_jump and clock_secs > (prev_clock_secs + 0.05):
                     if sport == "NBA":
                         # Prevent same-period clock regressions caused by stale/out-of-order packets.
                         clock_secs = prev_clock_secs
@@ -5241,6 +5290,7 @@ class ScoreSourceWindow(QMainWindow):
             "last_feed_ts": last_feed_ts,
             "feed_interval_avg": feed_interval_avg,
             "source": source,
+            "count_up": count_up,
         }
         self.clock_feed_interval_avg = feed_interval_avg
         return clock_text, shot_text, state
@@ -5300,6 +5350,10 @@ class ScoreSourceWindow(QMainWindow):
             bottom_left = self.center_panel.bottom_left.text()
             bottom_center = self.center_panel.bottom_center.text()
             bottom_right = self.center_panel.bottom_right.text()
+        elif sport == "NCAA BASKETBALL":
+            bottom_left = "BONUS" if self._team_in_bonus(data.get("away") or {}) else self._team_fouls_text(data.get("away") or {})
+            bottom_center = "FOULS"
+            bottom_right = "BONUS" if self._team_in_bonus(data.get("home") or {}) else self._team_fouls_text(data.get("home") or {})
         elif sport == "NFL":
             away = data.get("away") or {}
             home = data.get("home") or {}
@@ -5329,9 +5383,11 @@ class ScoreSourceWindow(QMainWindow):
             return False
         if "intermission" in status:
             return False
+        if re.search(r"\bht\b", status):
+            return False
         if any(tag in status for tag in ("am", "pm", "starts", "start")):
             return False
-        if period_text in ("FINAL", "HALF TIME", "Q-"):
+        if period_text in ("FINAL", "HALF TIME", "HT", "PK", "Q-", "H-"):
             return False
         return True
 
@@ -5347,21 +5403,19 @@ class ScoreSourceWindow(QMainWindow):
         buffer_sec = 0.0
         if sport_upper == "NBA":
             return True, buffer_sec, 2.0
+        if sport_upper == "NCAA BASKETBALL":
+            return True, buffer_sec, 2.5
         if sport_upper == "NHL":
             return True, buffer_sec, 3.0
         if sport_upper in ("NFL", "NCAA FOOTBALL"):
             return True, buffer_sec, 4.0
+        if sport_upper == "MLS":
+            return True, buffer_sec, 8.0
         return False, buffer_sec, self.clock_feed_stale_sec
 
     def _is_game_active(self, game: Dict[str, Any], period_text: str, header: Any) -> bool:
-        status_val = game.get("gameStatus") or game.get("status")
-        if isinstance(status_val, int):
-            if status_val == 2:
-                return True
-            if status_val in (0, 1) or status_val >= 3:
-                return False
         period_upper = (period_text or "").upper()
-        if period_upper in ("FINAL", "HALF TIME", "INTERMISSION", "INT", "Q-", "P-"):
+        if period_upper in ("FINAL", "HALF TIME", "HT", "PK", "INTERMISSION", "INT", "Q-", "H-", "P-"):
             return False
         if period_upper.startswith("INTERMISSION"):
             return False
@@ -5369,6 +5423,12 @@ class ScoreSourceWindow(QMainWindow):
             return False
         if period_upper.startswith("END OF"):
             return False
+        status_val = game.get("gameStatus") or game.get("status")
+        if isinstance(status_val, int):
+            if status_val == 2:
+                return True
+            if status_val in (0, 1) or status_val >= 3:
+                return False
         return self._is_live_clock(period_text, header)
 
     def _reset_center_bottom_styles(self) -> None:
@@ -5474,7 +5534,7 @@ class ScoreSourceWindow(QMainWindow):
         ):
             return "HALF TIME"
         if isinstance(status_val, int) and status_val >= 3:
-            if sport == "NBA":
+            if sport in ("NBA", "NCAA BASKETBALL"):
                 return "FINAL"
             if not self._has_live_game():
                 time_label = self._game_start_time_label(game)
@@ -5482,7 +5542,7 @@ class ScoreSourceWindow(QMainWindow):
                     return time_label
             return "FINAL"
         if any(k in status_text for k in ("final", "endgame", "ended")):
-            if sport == "NBA":
+            if sport in ("NBA", "NCAA BASKETBALL"):
                 return "FINAL"
             if not self._has_live_game():
                 time_label = self._game_start_time_label(game)
@@ -5496,11 +5556,26 @@ class ScoreSourceWindow(QMainWindow):
         elif isinstance(period_field, int):
             current_period = period_field
         if not isinstance(current_period, int):
+            header_text = str(game.get("_header") or "")
+            combined = f"{raw_status} {raw_clock} {header_text}".upper()
+            if sport == "MLS":
+                if any(tag in combined for tag in ("HALF TIME", "HALFTIME")) or re.search(r"\bHT\b", combined):
+                    return "HT"
+                if any(tag in combined for tag in ("PEN", "SHOOTOUT", "SHOOT OUT")) or re.search(r"\bPK\b", combined):
+                    return "PK"
+                if any(tag in combined for tag in ("AET", "EXTRA")):
+                    return "ET"
+                soccer_clock = self._extract_clock_text(raw_clock or raw_status or header_text)
+                minute_match = re.match(r"(\d{1,3})'", soccer_clock)
+                if minute_match:
+                    try:
+                        minute = int(minute_match.group(1))
+                    except Exception:
+                        minute = 0
+                    return "2H" if minute >= 46 else "1H"
             time_label = raw_status.strip()
             if time_label and time_label.upper() not in ("SCHEDULED", "TBA"):
                 return time_label
-            header_text = str(game.get("_header") or "")
-            combined = f"{raw_status} {raw_clock} {header_text}".upper()
             if sport in ("NBA", "NFL", "NCAA FOOTBALL"):
                 match = re.search(r"\bQ([1-4])\b", combined) or re.search(r"\b([1-4])(ST|ND|RD|TH)\b", combined)
                 if match:
@@ -5508,6 +5583,15 @@ class ScoreSourceWindow(QMainWindow):
                         current_period = int(match.group(1))
                     except Exception:
                         current_period = None
+            elif sport == "NCAA BASKETBALL":
+                match = re.search(r"\b([12])(ST|ND)\s+HALF\b", combined)
+                if match:
+                    try:
+                        current_period = int(match.group(1))
+                    except Exception:
+                        current_period = None
+                elif "OT" in combined:
+                    current_period = 3
             elif sport == "NHL":
                 match = re.search(r"\bPERIOD\s*([1-3])\b", combined) or re.search(
                     r"\b([1-3])(ST|ND|RD|TH)\b", combined
@@ -5522,7 +5606,24 @@ class ScoreSourceWindow(QMainWindow):
                 elif "OT" in combined:
                     return "OT"
             if not isinstance(current_period, int):
-                return "P-" if sport == "NHL" else "Q-"
+                if sport == "NHL":
+                    return "P-"
+                if sport == "NCAA BASKETBALL":
+                    return "H-"
+                return "Q-"
+        if sport == "NCAA BASKETBALL":
+            clock_secs = self._clock_to_seconds(game.get("gameClock"))
+            if current_period == 1 and clock_secs is not None and clock_secs <= 0.1:
+                return "HALF TIME"
+            if current_period == 1:
+                return "1ST HALF"
+            if current_period == 2:
+                return "2ND HALF"
+            if current_period == 3:
+                return "OT"
+            if current_period > 3:
+                return f"OT{current_period - 2}"
+            return "H-"
         if sport in ("NBA", "NFL", "NCAA FOOTBALL"):
             clock_secs = self._clock_to_seconds(game.get("gameClock"))
             if current_period == 2 and clock_secs is not None and clock_secs <= 0.1:
@@ -5552,6 +5653,26 @@ class ScoreSourceWindow(QMainWindow):
             if current_period > 4:
                 return f"OT {current_period - 3}"
             return "P-"
+        if sport == "MLS":
+            combined_status = f"{raw_status} {game.get('_header') or ''} {raw_clock}".upper()
+            if any(tag in combined_status for tag in ("HALF TIME", "HALFTIME")) or re.search(r"\bHT\b", combined_status):
+                return "HT"
+            if any(tag in combined_status for tag in ("PEN", "SHOOTOUT", "SHOOT OUT")) or re.search(r"\bPK\b", combined_status):
+                return "PK"
+            if any(tag in combined_status for tag in ("AET", "EXTRA")):
+                return "ET"
+            if isinstance(current_period, int):
+                if current_period == 1:
+                    return "1H"
+                if current_period == 2:
+                    return "2H"
+                if current_period >= 3:
+                    return "ET"
+            if any(tag in combined_status for tag in ("1ST HALF", "FIRST HALF")):
+                return "1H"
+            if any(tag in combined_status for tag in ("2ND HALF", "SECOND HALF")):
+                return "2H"
+            return "1H" if self._is_live_clock("1H", raw_status or raw_clock or game.get("_header")) else "Q-"
         if sport == "MLB":
             # For live games use ESPN inning text, but render half-inning with arrows.
             if raw_status.strip():
@@ -5635,8 +5756,12 @@ class ScoreSourceWindow(QMainWindow):
         clock_secs = state.get("clock_secs")
         shot_secs = state.get("shot_secs")
         updated = False
+        count_up = bool(state.get("count_up"))
         if clock_secs is not None and state.get("running", True):
-            clock_secs = max(0.0, clock_secs - delta)
+            if count_up:
+                clock_secs = max(0.0, clock_secs + delta)
+            else:
+                clock_secs = max(0.0, clock_secs - delta)
             updated = True
         if not updated:
             state["last_ts"] = now
@@ -5651,8 +5776,6 @@ class ScoreSourceWindow(QMainWindow):
         if clock_secs is not None:
             self.center_panel.set_state(period, self._format_clock(clock_secs), current_left_text, current_right_text, current_center_text)
         penalty_running = bool(state.get("running", True))
-        if self.sport_name.upper() == "NHL":
-            penalty_running = bool(state.get("raw_running", penalty_running))
         self._tick_penalty_state(now, penalty_running)
 
     def _tick_penalty_state(self, now: float, running: bool) -> None:
@@ -5906,13 +6029,67 @@ class ScoreSourceWindow(QMainWindow):
             return ""
         if sport == "NBA":
             return self._format_nba_info_line(data)
+        if sport == "NCAA BASKETBALL":
+            return self._format_ncaa_basketball_info_line(data)
         if sport in ("NFL", "NCAA FOOTBALL"):
             return self._format_nfl_info_line(data)
         if sport == "NHL":
             return self._format_nhl_info_line(data)
         if sport == "MLB":
             return self._format_mlb_info_line(data)
+        if sport == "MLS":
+            return self._format_mls_info_line(data)
         return self._format_generic_info_line(data)
+
+    def _ncaa_basketball_event_label(self, game: Dict[str, Any]) -> str:
+        if not isinstance(game, dict):
+            return ""
+        note = str(game.get("eventNote") or "").strip()
+        if note:
+            return note.upper()
+        bucket = str(game.get("eventBucket") or game.get("groupShortName") or game.get("groupName") or "").strip()
+        if bucket:
+            return bucket.upper()
+        return "MARCH MADNESS" if game.get("isMarchMadness") else ""
+
+    def _ncaa_basketball_theme_active(self) -> bool:
+        payload = self._ticker_boxscore_data()
+        game = payload.get("game") if isinstance(payload, dict) else {}
+        if not isinstance(game, dict):
+            return False
+        return bool(game.get("isMarchMadness") or game.get("isTournament"))
+
+    def _format_ncaa_basketball_info_line(self, data: Dict[str, Any]) -> str:
+        game = data.get("game") or {}
+        away = data.get("away") or {}
+        home = data.get("home") or {}
+        away_tri = (away.get("teamTricode") or "AWAY").upper()
+        home_tri = (home.get("teamTricode") or "HOME").upper()
+        away_score = self.backend.safe_score(away)
+        home_score = self.backend.safe_score(home)
+        period_text = self._format_period_badge({**game, "_header": data.get("header")})
+        clock_text = (
+            self._normalize_pbp_clock(game.get("gameClock"))
+            or self._normalize_pbp_clock(game.get("gameStatusText"))
+            or self._normalize_pbp_clock(data.get("header"))
+        )
+        extras = []
+        event_label = self._ncaa_basketball_event_label(game)
+        if event_label:
+            extras.append(event_label)
+        time_part = " ".join(
+            part
+            for part in (period_text, clock_text)
+            if part and part not in ("Q-", "FINAL", "HALF TIME")
+        )
+        if period_text == "HALF TIME":
+            extras.append(period_text)
+        elif time_part:
+            extras.append(time_part)
+        line = f"{away_tri} {away_score} @ {home_tri} {home_score}"
+        if extras:
+            line = f"{line} | {' | '.join(extras)}"
+        return line.strip()
 
     def _format_nba_info_line(self, data: Dict[str, Any]) -> str:
         game = data.get("game") or {}
@@ -6025,6 +6202,57 @@ class ScoreSourceWindow(QMainWindow):
                 extras.append(f"{out_count} OUT" if out_count == 1 else f"{out_count} OUTS")
         except Exception:
             pass
+        line = f"{away_tri} {away_score} @ {home_tri} {home_score}"
+        if extras:
+            line = f"{line} | {' | '.join(extras)}"
+        return line.strip()
+
+    def _format_mls_info_line(self, data: Dict[str, Any]) -> str:
+        game = data.get("game") or {}
+        away = data.get("away") or {}
+        home = data.get("home") or {}
+        away_tri = (away.get("teamTricode") or "AWY").upper()
+        home_tri = (home.get("teamTricode") or "HME").upper()
+        away_score = self.backend.safe_score(away)
+        home_score = self.backend.safe_score(home)
+        period_text = self._format_period_badge({**game, "_header": data.get("header")})
+        clock_text = (
+            self._extract_clock_text(game.get("gameClock"))
+            or self._extract_clock_text(game.get("gameStatusText"))
+            or self._extract_clock_text(data.get("header"))
+        )
+        extras: list[str] = []
+        if period_text == "FINAL":
+            extras.append("FT")
+        elif period_text == "HT":
+            extras.append("HT")
+        elif period_text not in ("FINAL", "Q-", "H-", "P-", "PK"):
+            time_parts = [part for part in (period_text, clock_text) if part]
+            if time_parts:
+                extras.append(" ".join(time_parts))
+        elif period_text == "PK":
+            extras.append("PK")
+
+        away_shots = self._team_stat_text(away, ("shotsOnGoal", "shotsOnTarget"), default="")
+        home_shots = self._team_stat_text(home, ("shotsOnGoal", "shotsOnTarget"), default="")
+        if away_shots and home_shots:
+            extras.append(f"SOG {away_shots}-{home_shots}")
+
+        away_poss = self._team_stat_text(away, ("possessionPct",), default="", suffix="%")
+        home_poss = self._team_stat_text(home, ("possessionPct",), default="", suffix="%")
+        if away_poss and home_poss:
+            extras.append(f"POSS {away_poss}-{home_poss}")
+
+        away_yc = self._team_stat_text(away, ("yellowCards",), default="")
+        home_yc = self._team_stat_text(home, ("yellowCards",), default="")
+        if away_yc and home_yc and any(val not in ("0", "0%", "0.0%") for val in (away_yc, home_yc)):
+            extras.append(f"YC {away_yc}-{home_yc}")
+
+        away_rc = self._team_stat_text(away, ("redCards",), default="")
+        home_rc = self._team_stat_text(home, ("redCards",), default="")
+        if away_rc and home_rc and any(val not in ("0", "0%", "0.0%") for val in (away_rc, home_rc)):
+            extras.append(f"RC {away_rc}-{home_rc}")
+
         line = f"{away_tri} {away_score} @ {home_tri} {home_score}"
         if extras:
             line = f"{line} | {' | '.join(extras)}"
@@ -6540,7 +6768,7 @@ class ScoreSourceWindow(QMainWindow):
 
     def _display_tricode(self, team: Dict[str, Any], fallback: str = "") -> str:
         tri = (team.get("teamTricode") or team.get("tricode") or fallback or "").upper()
-        if self.sport_name.upper() in ("NCAA FOOTBALL", "MLS"):
+        if self.sport_name.upper() in ("NCAA FOOTBALL", "NCAA BASKETBALL", "MLS"):
             return tri
         return tri[:3]
 
@@ -6564,6 +6792,9 @@ class ScoreSourceWindow(QMainWindow):
         raw_text = str(raw)
         if re.search(r"\b(am|pm)\b", raw_text.lower()):
             return ""
+        soccer_match = re.search(r"(\d{1,3}'(?:\+\d{1,2}')?)", raw_text)
+        if soccer_match:
+            return soccer_match.group(1)
         secs = self._clock_to_seconds(raw)
         if secs is not None:
             return self._format_clock(secs)
@@ -6778,6 +7009,38 @@ class ScoreSourceWindow(QMainWindow):
                 except Exception:
                     return str(val)
         return "--"
+
+    def _team_stat_text(
+        self,
+        team: Dict[str, Any],
+        keys: tuple[str, ...],
+        *,
+        default: str = "--",
+        suffix: str = "",
+    ) -> str:
+        def _format_value(raw: Any) -> str:
+            if raw in (None, ""):
+                return ""
+            try:
+                number = float(raw)
+            except Exception:
+                text = str(raw).strip()
+                return f"{text}{suffix}" if text else ""
+            if suffix == "%" and not number.is_integer():
+                return f"{number:.1f}{suffix}"
+            if number.is_integer():
+                return f"{int(number)}{suffix}"
+            return f"{number:.1f}{suffix}"
+
+        stats = team.get("statistics") or {}
+        for key in keys:
+            value = team.get(key)
+            if value in (None, ""):
+                value = stats.get(key)
+            text = _format_value(value)
+            if text:
+                return text
+        return default
 
     def _team_shootout_score_text(self, team: Dict[str, Any]) -> str:
         def _coerce(val: Any) -> int | None:
@@ -7160,20 +7423,36 @@ class ScoreSourceWindow(QMainWindow):
             """
         )
         if getattr(self, "seam_shadow", None) is not None:
-            self.seam_shadow.setStyleSheet(
-                """
-                QFrame {
-                    background: qlineargradient(
-                        x1:0, y1:0, x2:1, y2:0,
-                        stop:0 rgba(0, 0, 0, 0),
-                        stop:0.25 rgba(0, 0, 0, 0.45),
-                        stop:0.5 rgba(0, 0, 0, 0.85),
-                        stop:0.75 rgba(0, 0, 0, 0.45),
-                        stop:1 rgba(0, 0, 0, 0)
-                    );
-                }
-                """
-            )
+            if self.sport_name.upper() == "NCAA BASKETBALL" and self._ncaa_basketball_theme_active():
+                self.seam_shadow.setStyleSheet(
+                    """
+                    QFrame {
+                        background: qlineargradient(
+                            x1:0, y1:0, x2:1, y2:0,
+                            stop:0 rgba(0, 0, 0, 0),
+                            stop:0.18 rgba(0, 0, 0, 0.38),
+                            stop:0.5 rgba(255, 170, 56, 0.72),
+                            stop:0.82 rgba(0, 0, 0, 0.38),
+                            stop:1 rgba(0, 0, 0, 0)
+                        );
+                    }
+                    """
+                )
+            else:
+                self.seam_shadow.setStyleSheet(
+                    """
+                    QFrame {
+                        background: qlineargradient(
+                            x1:0, y1:0, x2:1, y2:0,
+                            stop:0 rgba(0, 0, 0, 0),
+                            stop:0.25 rgba(0, 0, 0, 0.45),
+                            stop:0.5 rgba(0, 0, 0, 0.85),
+                            stop:0.75 rgba(0, 0, 0, 0.45),
+                            stop:1 rgba(0, 0, 0, 0)
+                        );
+                    }
+                    """
+                )
             self.seam_shadow.show()
         if getattr(self, "nfl_bow_left", None) is not None:
             self.nfl_bow_left.hide()
@@ -7239,6 +7518,10 @@ class ScoreSourceWindow(QMainWindow):
             return
         if sport == "NHL":
             self.center_panel.period_label.setStyleSheet("color: #e6edf7; font-weight: 800; font-size: 16px;")
+        elif sport == "NCAA BASKETBALL" and self._ncaa_basketball_theme_active():
+            self.center_panel.period_label.setStyleSheet(
+                "color: #ffd36e; font-weight: 900; font-size: 15px; letter-spacing: 0.8px;"
+            )
         else:
             self.center_panel.period_label.setStyleSheet("color: #e6edf7; font-weight: 700; font-size: 14px;")
 
