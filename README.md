@@ -1,6 +1,6 @@
 ## ScoreSource
 
-Fixed-resolution (1280x400) PySide6 LED scoreboard for multi-sport coverage (NBA, NFL, NHL, MLS, MLB, NCAA Football) with live and scheduled views.
+Fixed-resolution (1280x400) PySide6 LED scoreboard for multi-sport coverage (NBA, NCAA Basketball, NFL, NCAA Football, NHL, MLS, MLB) with live and scheduled views.
 
 ### Features
 - LED-first layout: 1280x400 canvas with tabbed UI, game list, and team cards optimized for readability at distance
@@ -22,6 +22,11 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python -m scoresource.main
+```
+
+Alternate launcher:
+```bash
+python launcher.py
 ```
 
 ### Environment

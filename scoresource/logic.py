@@ -24,12 +24,21 @@ import requests
 from .common.lineups import ESPN_SPORT_PATH
 from .common.utils import iso_to_local
 from .common.timefmt import format_start_time
-from . import nba, nfl, mlb, nhl, ncaa_football, mls
-from .sports import mlb as sports_mlb, nba as sports_nba, nfl as sports_nfl, nhl as sports_nhl, mls as sports_mls
+from .registry import canonicalize_sport_name
+from . import nba, nfl, mlb, nhl, ncaa_football, ncaa_basketball, mls
+from .sports import (
+    mlb as sports_mlb,
+    nba as sports_nba,
+    nfl as sports_nfl,
+    nhl as sports_nhl,
+    mls as sports_mls,
+    ncaa_basketball as sports_ncaa_basketball,
+)
 from .sports import ncaa_football as sports_ncaa_football
 
 BACKENDS: Dict[str, Any] = {
     "NBA": nba,
+    "NCAA BASKETBALL": ncaa_basketball,
     "NFL": nfl,
     "MLB": mlb,
     "NHL": nhl,
@@ -39,6 +48,7 @@ BACKENDS: Dict[str, Any] = {
 
 NORMALIZED_FETCHERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "NBA": sports_nba.fetch_live,
+    "NCAA BASKETBALL": sports_ncaa_basketball.fetch_live,
     "NFL": sports_nfl.fetch_live,
     "MLB": sports_mlb.fetch_live,
     "NHL": sports_nhl.fetch_live,
@@ -65,6 +75,7 @@ MLB_STATS_TEAM_TTL_SEC = 60 * 60 * 24
 MLB_HEADSHOT_LOOKUP_TTL_SEC = 60 * 60 * 24
 CORE_ATHLETE_PATHS: Dict[str, tuple[str, str]] = {
     "NBA": ("basketball", "nba"),
+    "NCAA BASKETBALL": ("basketball", "mens-college-basketball"),
     "NFL": ("football", "nfl"),
     "NHL": ("hockey", "nhl"),
     "MLB": ("baseball", "mlb"),
@@ -73,6 +84,7 @@ CORE_ATHLETE_PATHS: Dict[str, tuple[str, str]] = {
 }
 ESPN_HEADSHOT_SPORT_PATHS: Dict[str, tuple[str, ...]] = {
     "NBA": ("nba",),
+    "NCAA BASKETBALL": ("mens-college-basketball", "ncb"),
     "NFL": ("nfl",),
     "NHL": ("nhl",),
     "MLB": ("mlb",),
@@ -119,6 +131,17 @@ NBA_TO_ESPN_TRICODE_ALIASES: Dict[str, str] = {nba: espn for espn, nba in ESPN_T
 CAREER_STATS_MAX_FIELDS = 12
 CAREER_STAT_ALIASES: Dict[str, list[tuple[str, tuple[str, ...]]]] = {
     "NBA": [
+        ("GP", ("gp", "gamesplayed", "games")),
+        ("PTS", ("pts", "points", "avgpoints", "ppg")),
+        ("REB", ("reb", "rebounds", "totalrebounds", "avgrebounds", "rpg")),
+        ("AST", ("ast", "assists", "avgassists", "apg")),
+        ("STL", ("stl", "steals", "avgsteals", "spg")),
+        ("BLK", ("blk", "blocks", "avgblocks", "bpg")),
+        ("FG%", ("fg", "fgpct", "fieldgoalpct")),
+        ("3P%", ("3p", "3ppct", "threepointpct", "threepointfieldgoalpct")),
+        ("FT%", ("ft", "ftpct", "freethrowpct")),
+    ],
+    "NCAA BASKETBALL": [
         ("GP", ("gp", "gamesplayed", "games")),
         ("PTS", ("pts", "points", "avgpoints", "ppg")),
         ("REB", ("reb", "rebounds", "totalrebounds", "avgrebounds", "rpg")),
@@ -244,7 +267,7 @@ class ScoreSourceLogic:
         # accept default_sport for legacy callers
         active = default_sport or sport or "NBA"
         self.task_manager = TaskManager()
-        self.current_sport = active.upper()
+        self.current_sport = canonicalize_sport_name(active)
         self._realtime_client = None
         self._http_session = requests.Session()
         self._player_profile_lock = threading.Lock()
@@ -265,10 +288,10 @@ class ScoreSourceLogic:
         return self.fetch_boxscore(self.current_sport, game_id)
 
     def set_sport(self, sport: str) -> None:
-        self.current_sport = sport.upper()
+        self.current_sport = canonicalize_sport_name(sport)
 
     def fetch_scores(self, sport: str | None = None) -> Dict[str, Any]:
-        sp = (sport or self.current_sport).upper()
+        sp = canonicalize_sport_name(sport or self.current_sport)
         backend = BACKENDS.get(sp)
         if not backend:
             return _demo_scoreboard(sp)
@@ -283,7 +306,7 @@ class ScoreSourceLogic:
             return _demo_scoreboard(sp)
 
     def fetch_boxscore(self, sport: str | None, game_id: str) -> Dict[str, Any]:
-        sp = (sport or self.current_sport).upper()
+        sp = canonicalize_sport_name(sport or self.current_sport)
         backend = BACKENDS.get(sp)
         if not backend:
             return _demo_boxscore(sp, game_id)
@@ -298,7 +321,7 @@ class ScoreSourceLogic:
             return _demo_boxscore(sp, game_id)
 
     def fetch_scores_for_sport(self, sport: str | None = None) -> Dict[str, Any]:
-        sp = (sport or self.current_sport).upper()
+        sp = canonicalize_sport_name(sport or self.current_sport)
         fetcher = NORMALIZED_FETCHERS.get(sp)
         if fetcher:
             try:
@@ -314,7 +337,7 @@ class ScoreSourceLogic:
         return {"games": games, "lines": data.get("lines") or []}
 
     def load_logo(self, sport: str, team_id: str | None, tricode: str | None, is_super_bowl: bool = False) -> bytes | None:
-        sp = (sport or self.current_sport).upper()
+        sp = canonicalize_sport_name(sport or self.current_sport)
         backend = BACKENDS.get(sp)
         if backend and hasattr(backend, "get_team_logo"):
             try:
@@ -333,7 +356,7 @@ class ScoreSourceLogic:
         player_jersey: str | None = None,
         team_tricode: str | None = None,
     ) -> Dict[str, Any]:
-        sp = (sport or self.current_sport).upper()
+        sp = canonicalize_sport_name(sport or self.current_sport)
         path = ESPN_SPORT_PATH.get(sp)
         team_key = str(team_id or "").strip()
         player_key = str(player_id or "").strip()
@@ -433,7 +456,7 @@ class ScoreSourceLogic:
         return self._espn_team_id_for_tricode("NBA", tricode)
 
     def _espn_team_id_for_tricode(self, sport: str, tricode: str) -> str:
-        sp = str(sport or "").upper()
+        sp = canonicalize_sport_name(sport)
         tri = str(tricode or "").strip().upper()
         if not tri:
             return ""
@@ -523,7 +546,7 @@ class ScoreSourceLogic:
         source_player_id: str | None = None,
         common_payload: Dict[str, Any] | None = None,
     ) -> Dict[str, str]:
-        sp = str(sport or "").upper()
+        sp = canonicalize_sport_name(sport)
         pid = str(player_id or "").strip()
         if not pid:
             return {}
@@ -642,7 +665,7 @@ class ScoreSourceLogic:
         *,
         source_player_id: str | None = None,
     ) -> str:
-        sport_key = str(sport or "").upper()
+        sport_key = canonicalize_sport_name(sport)
         if sport_key == "MLB":
             return ""
 
@@ -799,7 +822,7 @@ def _select_career_stats(sport: str, stats: list[Dict[str, Any]]) -> Dict[str, s
         return {}
     selected: Dict[str, str] = {}
     used: set[int] = set()
-    alias_rows = CAREER_STAT_ALIASES.get(sport.upper(), [])
+    alias_rows = CAREER_STAT_ALIASES.get(canonicalize_sport_name(sport), [])
 
     def _match_score(label: str, alias: str, stat: Dict[str, Any], tokens: set[str]) -> int:
         if not alias:
@@ -946,7 +969,7 @@ def _team_tricode_alias(sport: str, tricode: str) -> str:
     tri = _normalize_text(tricode).upper()
     if not tri:
         return ""
-    return SPORT_TEAM_TRICODE_ALIASES.get(str(sport or "").upper(), {}).get(tri, "")
+    return SPORT_TEAM_TRICODE_ALIASES.get(canonicalize_sport_name(sport), {}).get(tri, "")
 
 
 def _athlete_id_candidates(athlete: Dict[str, Any]) -> list[str]:
@@ -1207,7 +1230,7 @@ def _athlete_team_logo(athlete: Dict[str, Any]) -> str:
 
 # ---------------- demo helpers ----------------
 def _demo_scoreboard(sport: str) -> Dict[str, Any]:
-    sport = sport.upper()
+    sport = canonicalize_sport_name(sport)
     now = time.time()
     return {
         "games": [
@@ -1243,6 +1266,7 @@ def _normalize_scoreboard_for_ui(raw: Dict[str, Any], sport: str) -> Dict[str, A
 
 
 def _normalize_game_for_ui(raw_game: Dict[str, Any], sport: str) -> Dict[str, Any]:
+    sport_key = canonicalize_sport_name(sport)
     home_team = _as_team_dict(raw_game.get("homeTeam") or raw_game.get("home") or {}, "Home")
     away_team = _as_team_dict(raw_game.get("awayTeam") or raw_game.get("away") or {}, "Away")
     status = _normalize_status(raw_game.get("status") or raw_game.get("gameStatus") or raw_game.get("state"))
@@ -1262,7 +1286,7 @@ def _normalize_game_for_ui(raw_game: Dict[str, Any], sport: str) -> Dict[str, An
 
     return {
         "gameId": str(raw_game.get("gameId") or raw_game.get("id") or ""),
-        "sport": sport.upper(),
+        "sport": sport_key,
         "status": status,
         "home": _team_display_name(home_team, "Home"),
         "away": _team_display_name(away_team, "Away"),

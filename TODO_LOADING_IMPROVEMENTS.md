@@ -11,6 +11,6 @@
 - [ ] Update requirements.txt: Add cachetools>=5.3.0
 - [ ] Edit scoresource/nfl.py: Replace global caches with TTLCache
 - [ ] Edit scoresource/logic.py: Add async fetching methods
-- [ ] Edit scoresource/ui.py: Add loading states and async handling
+- [ ] Edit scoresource/ui/window.py: Add loading states and async handling
 - [ ] Optimize redundant processing in backends
 - [ ] Test changes: Run app, check memory, responsiveness

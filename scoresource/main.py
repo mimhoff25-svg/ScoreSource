@@ -1,34 +1,46 @@
 from __future__ import annotations
 
+import glob
+import os
 import sys
-from typing import Dict, Any
+from typing import Dict
+
+# Auto-detect X display if not set (e.g. launched from a bare terminal)
+if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+    _socks = sorted(glob.glob("/tmp/.X11-unix/X*"))
+    if _socks:
+        _num = _socks[0].replace("/tmp/.X11-unix/X", "")
+        os.environ["DISPLAY"] = f":{_num}"
 
 from PySide6.QtWidgets import QApplication
 
 from .ui import ScoreSourceWindow
 from .logic import ScoreSourceLogic
-from .registry import SPORT_REGISTRY, SPORT_ORDER
+from .registry import DEFAULT_SPORT_DISPLAY, SPORT_ORDER, get_sport_config
 
 
 def _switch_sport(name: str, window: ScoreSourceWindow) -> None:
     # Called when the user changes sport in the combo box.
-    from .registry import SPORT_REGISTRY  # re-import in case of hot-reload
+    from .registry import get_sport_config  # re-import in case of hot-reload
 
-    config = SPORT_REGISTRY.get(name)
+    config = get_sport_config(name)
     if not config:
         return
 
+    display_name = str(config["display_name"])
+    sport_key = str(config["sport_key"])
     backend = config["backend"]
     sport_logo_path = config.get("logo_path")
 
     # Swap backend, sport name, and refresh.
     window.backend = backend
-    window.sport_name = name
+    window.sport_name = display_name
+    window._sport_key = sport_key
     if getattr(window, "logic", None):
-        window.logic.set_sport(name)  # type: ignore[attr-defined]
+        window.logic.set_sport(sport_key)  # type: ignore[attr-defined]
     else:
-        window.logic = ScoreSourceLogic(default_sport=name)
-    window.setWindowTitle(f"ScoreSource – {name}")
+        window.logic = ScoreSourceLogic(default_sport=sport_key)
+    window.setWindowTitle(f"ScoreSource – {display_name}")
     window._sport_options = SPORT_ORDER
     window._sport_logo_path = sport_logo_path
     window.update_table_headers(getattr(backend, "sport_table_headers", None))
@@ -49,12 +61,16 @@ def _switch_sport(name: str, window: ScoreSourceWindow) -> None:
 def main() -> None:
     app = QApplication(sys.argv)
 
-    default_sport = "NBA"
-    config = SPORT_REGISTRY[default_sport]
+    config = get_sport_config(DEFAULT_SPORT_DISPLAY)
+    if not config:
+        raise RuntimeError("Default sport registry entry is missing.")
+
+    default_sport = str(config["display_name"])
+    default_sport_key = str(config["sport_key"])
     backend = config["backend"]
     sport_logo_path = config.get("logo_path")
 
-    logic = ScoreSourceLogic(default_sport=default_sport)
+    logic = ScoreSourceLogic(default_sport=default_sport_key)
 
     # Build optional icon map if you have icons; otherwise leave empty:
     sport_icon_map: Dict[str, str] = {
@@ -72,6 +88,7 @@ def main() -> None:
         sport_logo_path=sport_logo_path,
         sport_icon_map=sport_icon_map,
     )
+    window._sport_key = default_sport_key
     window.show()
     sys.exit(app.exec())
 

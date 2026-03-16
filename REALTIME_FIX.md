@@ -215,7 +215,7 @@ export SCORESOURCE_REALTIME_POLL_INTERVAL=1.0  # Faster updates for testing
 
 ### Files Unchanged
 - `scoresource/logic.py` - No changes needed
-- `scoresource/ui.py` - No changes needed
+- `scoresource/ui/window.py` - No changes needed
 - All other backend files - No changes needed
 
 ### Backward Compatibility

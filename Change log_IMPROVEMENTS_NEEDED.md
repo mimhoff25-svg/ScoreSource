@@ -121,7 +121,7 @@ def _fetch_data():
 
 ### 2.2 Magic Numbers and Hardcoded Values
 
-**Location:** `scoresource/nfl.py`, `scoresource/ui.py`
+**Location:** `scoresource/nfl.py`, `scoresource/ui/window.py`
 
 **Issues:**
 ```python
@@ -199,7 +199,7 @@ def get_scoreboard() -> Dict[str, Any]:  # Too generic
 
 ### 3.1 Tight Coupling Between UI and Backend
 
-**Location:** `scoresource/ui.py` (5000+ lines)
+**Location:** `scoresource/ui/window.py` (5000+ lines)
 
 **Issues:**
 - UI directly calls backend methods
@@ -286,7 +286,7 @@ logo_cache = TTLCache(maxsize=100, ttl=3600)
 
 ### 4.2 Blocking API Calls in UI Thread
 
-**Location:** `scoresource/ui.py`
+**Location:** `scoresource/ui/window.py`
 
 **Issues:**
 ```python

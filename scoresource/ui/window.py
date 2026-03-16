@@ -1,6 +1,6 @@
 """
 PySide6 UI for ScoreSource.
-Layout: neon night 1280x480 scoreboard with team panels, center clock/shot clock,
+Layout: neon night 1280x400 scoreboard with team panels, center clock/shot clock,
 and player stat tables. Periodically polls the active sport backend.
 """
 
@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from colorsys import hls_to_rgb, rgb_to_hls
 from datetime import datetime
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -71,10 +72,11 @@ GAME_LOGO_HOME_KEY_ROLE = Qt.UserRole + 13
 PLAYER_CONTEXT_ROLE = Qt.UserRole + 20
 GAME_LOGO_SIZE = 36
 
-from . import nba as default_backend
-from .logic import ScoreSourceLogic
-from .realtime import RealTimeGameState
-from .common.utils import extract_three_point_made, format_player_initial_name, iso_to_local
+from .. import nba as default_backend
+from ..logic import ScoreSourceLogic
+from ..registry import canonicalize_sport_name
+from ..realtime import RealTimeGameState
+from ..common.utils import extract_three_point_made, format_player_initial_name, iso_to_local
 
 # Palette
 BG = "#050b16"
@@ -147,6 +149,10 @@ LOGO_SHADOW_OVERRIDES = {
 MLB_BG_COLOR_OVERRIDES = {
     # Keep Pirates side darker so the mark doesn't fight the yellow-heavy panel tint.
     "PIT": ("#141922", "#2a303b"),
+}
+NHL_BG_COLOR_OVERRIDES = {
+    # Hold Dallas on a stronger Victory Green panel instead of drifting toward teal/neon.
+    "DAL": ("#006847", "#0a7a55"),
 }
 CENTER_SEAM_WIDTH = 220
 TOP_H_MARGIN = 24
@@ -1667,6 +1673,7 @@ class ScoreSourceWindow(QMainWindow):
     ):
         super().__init__()
         self.sport_name = sport_name
+        self._sport_key = canonicalize_sport_name(sport_name)
         self.setWindowTitle(f"ScoreSource – {self.sport_name}")
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
         self.setWindowFlag(Qt.FramelessWindowHint, True)
@@ -1679,7 +1686,7 @@ class ScoreSourceWindow(QMainWindow):
         if logic is not None:
             self.logic = logic
         else:
-            self.logic = ScoreSourceLogic() if self.sport_name.upper() == "NBA" else None
+            self.logic = ScoreSourceLogic(default_sport=self._sport_key)
         self._switch_sport = switch_sport
         self._sport_options = sport_options or ["NBA"]
         self._sport_icon_map = sport_icon_map or {}
@@ -1697,7 +1704,7 @@ class ScoreSourceWindow(QMainWindow):
         except Exception:
             self.feed_delay_ms = 60_000
         self._delay_is_default = "SCORESOURCE_FEED_DELAY_SEC" not in os.environ
-        if self._delay_is_default and self.sport_name.upper() != "NBA":
+        if self._delay_is_default and self._sport_key != "NBA":
             self.feed_delay_ms = 0
         try:
             self.boxscore_poll_default_ms = max(
@@ -1849,7 +1856,7 @@ class ScoreSourceWindow(QMainWindow):
         return list(resolved)
 
     def _make_default_icon(self) -> QPixmap:
-        icon_path = Path(__file__).resolve().parent / "assets" / "icon.png"
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
         if icon_path.exists():
             pix = QPixmap(str(icon_path))
             if not pix.isNull():
@@ -3795,13 +3802,10 @@ class ScoreSourceWindow(QMainWindow):
         if self.sport_name.upper() == "NHL":
             left_secondary = left_alt
             right_secondary = right_alt
-        if self.sport_name.upper() == "MLB":
-            left_override = MLB_BG_COLOR_OVERRIDES.get(left_tri)
-            right_override = MLB_BG_COLOR_OVERRIDES.get(right_tri)
-            if left_override:
-                left_color, left_secondary = left_override
-            if right_override:
-                right_color, right_secondary = right_override
+        left_color, left_secondary, left_alt = self._resolve_team_theme_colors(left_tri, left_color, left_secondary, left_alt)
+        right_color, right_secondary, right_alt = self._resolve_team_theme_colors(
+            right_tri, right_color, right_secondary, right_alt
+        )
         left_text = self._top_text_color(left_color)
         right_text = self._top_text_color(right_color)
         left_name_text = "#f7f7f7" if left_tri == "SAS" else left_text
@@ -5199,6 +5203,7 @@ class ScoreSourceWindow(QMainWindow):
         # Count-down sports decrease the raw clock; MLS increases elapsed time.
         raw_running = False
         clock_running = False
+        synthetic_window_sec = None
         now = time.monotonic()
         last_feed_ts = prev.get("last_feed_ts", now)
         feed_interval_avg = prev.get("feed_interval_avg", self.clock_feed_interval_avg)
@@ -5237,8 +5242,11 @@ class ScoreSourceWindow(QMainWindow):
                     synthetic_window = min(stale_window, 8.0)
                 else:
                     synthetic_window = min(stale_window, 4.0)
+                synthetic_window_sec = synthetic_window
                 if (prev.get("running") or prev.get("raw_running")) and (now - last_feed_ts) <= synthetic_window:
                     clock_running = True
+            if synthetic_window_sec is None and sport != "MLS":
+                synthetic_window_sec = 2.0 if sport == "NBA" else (3.0 if sport == "NHL" else 4.0)
             if sport == "NHL" and raw_secs <= 0.1:
                 clock_running = False
             elif sport == "MLS":
@@ -5247,10 +5255,24 @@ class ScoreSourceWindow(QMainWindow):
                 clock_running = True
 
         clock_secs = None
+        snap_to_official_stop = False
+        if (
+            sport == "NBA"
+            and raw_secs is not None
+            and prev_raw is not None
+            and abs(float(raw_secs) - float(prev_raw)) <= 0.05
+            and prev.get("clock_secs") is not None
+            and float(raw_secs) > (float(prev.get("clock_secs")) + 0.75)
+            and not raw_running
+        ):
+            # If the official clock is unchanged but our synthetic timer ran low,
+            # snap back to the feed instead of preserving the drifted local value.
+            snap_to_official_stop = True
+
         if raw_secs is not None:
             clock_secs = max(0.0, raw_secs + buffer) if count_up else max(0.0, raw_secs - buffer)
             # If the feed isn't moving, hold at the lowest seen value to avoid flicker
-            if not clock_running and prev.get("clock_secs") is not None and not period_changed:
+            if not clock_running and prev.get("clock_secs") is not None and not period_changed and not snap_to_official_stop:
                 if count_up:
                     clock_secs = max(prev["clock_secs"], clock_secs)
                 else:
@@ -5266,12 +5288,12 @@ class ScoreSourceWindow(QMainWindow):
                 if count_up and not raw_jump and clock_secs < (prev_clock_secs - 0.05):
                     clock_secs = prev_clock_secs
                 elif not count_up and not raw_jump and clock_secs > (prev_clock_secs + 0.05):
-                    if sport == "NBA":
+                    if not snap_to_official_stop and sport == "NBA":
                         # Prevent same-period clock regressions caused by stale/out-of-order packets.
                         clock_secs = prev_clock_secs
-                    elif sport == "NHL":
+                    elif not snap_to_official_stop and sport == "NHL":
                         clock_secs = prev_clock_secs
-                    else:
+                    elif not snap_to_official_stop:
                         if (clock_secs - prev_clock_secs) <= 0.5:
                             clock_secs = prev_clock_secs
 
@@ -5291,6 +5313,7 @@ class ScoreSourceWindow(QMainWindow):
             "feed_interval_avg": feed_interval_avg,
             "source": source,
             "count_up": count_up,
+            "synthetic_window_sec": synthetic_window_sec,
         }
         self.clock_feed_interval_avg = feed_interval_avg
         return clock_text, shot_text, state
@@ -5757,6 +5780,18 @@ class ScoreSourceWindow(QMainWindow):
         shot_secs = state.get("shot_secs")
         updated = False
         count_up = bool(state.get("count_up"))
+        synthetic_window = state.get("synthetic_window_sec")
+        source = str(state.get("source") or "")
+        last_feed_ts = state.get("last_feed_ts")
+        if (
+            self.sport_name.upper() == "NBA"
+            and source == "realtime"
+            and not count_up
+            and synthetic_window not in (None, "")
+            and last_feed_ts is not None
+            and (now - float(last_feed_ts)) > float(synthetic_window)
+        ):
+            state["running"] = False
         if clock_secs is not None and state.get("running", True):
             if count_up:
                 clock_secs = max(0.0, clock_secs + delta)
@@ -7475,23 +7510,134 @@ class ScoreSourceWindow(QMainWindow):
         )
 
     def _top_text_color(self, color_hex: str) -> str:
+        luminance = self._color_luminance(color_hex)
+        return "#0b0f16" if luminance > 0.6 else "#f7f7f7"
+
+    def _hex_to_rgb(self, color_hex: str) -> tuple[int, int, int]:
+        hex_value = (color_hex or "").lstrip("#")
+        if len(hex_value) != 6:
+            return (0, 0, 0)
+        try:
+            return tuple(int(hex_value[i : i + 2], 16) for i in (0, 2, 4))
+        except Exception:
+            return (0, 0, 0)
+
+    def _rgb_to_hex(self, rgb: tuple[int, int, int]) -> str:
+        r, g, b = [max(0, min(255, int(val))) for val in rgb]
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _color_luminance(self, color_hex: str) -> float:
         def _channel(val: int) -> float:
             srgb = val / 255.0
             if srgb <= 0.03928:
                 return srgb / 12.92
             return ((srgb + 0.055) / 1.055) ** 2.4
 
-        try:
-            hex_value = (color_hex or "").lstrip("#")
-            if len(hex_value) != 6:
-                return "#f7f7f7"
-            r = int(hex_value[0:2], 16)
-            g = int(hex_value[2:4], 16)
-            b = int(hex_value[4:6], 16)
-        except Exception:
-            return "#f7f7f7"
-        luminance = 0.2126 * _channel(r) + 0.7152 * _channel(g) + 0.0722 * _channel(b)
-        return "#0b0f16" if luminance > 0.6 else "#f7f7f7"
+        r, g, b = self._hex_to_rgb(color_hex)
+        return 0.2126 * _channel(r) + 0.7152 * _channel(g) + 0.0722 * _channel(b)
+
+    def _color_contrast_ratio(self, color_a: str, color_b: str) -> float:
+        lum_a = self._color_luminance(color_a)
+        lum_b = self._color_luminance(color_b)
+        hi = max(lum_a, lum_b)
+        lo = min(lum_a, lum_b)
+        return (hi + 0.05) / (lo + 0.05)
+
+    def _color_hue_distance(self, color_a: str, color_b: str) -> float:
+        ra, ga, ba = [channel / 255.0 for channel in self._hex_to_rgb(color_a)]
+        rb, gb, bb = [channel / 255.0 for channel in self._hex_to_rgb(color_b)]
+        hue_a = rgb_to_hls(ra, ga, ba)[0]
+        hue_b = rgb_to_hls(rb, gb, bb)[0]
+        distance = abs(hue_a - hue_b)
+        return min(distance, 1.0 - distance)
+
+    def _tone_variant(
+        self,
+        color_hex: str,
+        *,
+        target_lightness: float | None = None,
+        lightness_delta: float = 0.0,
+        saturation_scale: float = 1.0,
+    ) -> str:
+        r, g, b = [channel / 255.0 for channel in self._hex_to_rgb(color_hex)]
+        hue, lightness, saturation = rgb_to_hls(r, g, b)
+        if target_lightness is None:
+            lightness = max(0.0, min(1.0, lightness + lightness_delta))
+        else:
+            lightness = max(0.0, min(1.0, target_lightness))
+        saturation = max(0.0, min(1.0, saturation * saturation_scale))
+        rr, gg, bb = hls_to_rgb(hue, lightness, saturation)
+        return self._rgb_to_hex((round(rr * 255), round(gg * 255), round(bb * 255)))
+
+    def _derive_panel_secondary(self, primary: str) -> str:
+        lum = self._color_luminance(primary)
+        _, lightness, saturation = rgb_to_hls(*[channel / 255.0 for channel in self._hex_to_rgb(primary)])
+        if lum < 0.18:
+            target_lightness = max(0.34, lightness + 0.22)
+            saturation_scale = 0.48
+        elif lum < 0.32:
+            target_lightness = max(0.30, lightness + 0.16)
+            saturation_scale = 0.55
+        else:
+            target_lightness = max(0.14, lightness - 0.18)
+            saturation_scale = 0.68
+        candidate = self._tone_variant(primary, target_lightness=target_lightness, saturation_scale=saturation_scale)
+        if self._color_contrast_ratio(primary, candidate) < 1.6:
+            if lum < 0.32:
+                candidate = self._mix_color(primary, "#dbe5f2", 0.58)
+            else:
+                candidate = self._mix_color(primary, PANEL, 0.28)
+        return candidate
+
+    def _derive_panel_accent(self, primary: str) -> str:
+        lum = self._color_luminance(primary)
+        _, lightness, saturation = rgb_to_hls(*[channel / 255.0 for channel in self._hex_to_rgb(primary)])
+        if lum < 0.28:
+            target_lightness = max(0.58, lightness + 0.28)
+            saturation_scale = max(0.5, min(0.9, saturation * 0.7))
+        else:
+            target_lightness = max(0.24, lightness - 0.16)
+            saturation_scale = min(1.0, max(0.45, saturation * 0.75))
+        return self._tone_variant(primary, target_lightness=target_lightness, saturation_scale=saturation_scale)
+
+    def _resolve_team_theme_colors(
+        self,
+        tri: str | None,
+        primary: str,
+        secondary: str | None,
+        accent: str | None,
+    ) -> tuple[str, str, str]:
+        sport = self.sport_name.upper()
+        tri_key = (tri or "").upper()
+        resolved_primary = primary or ACCENT
+        resolved_secondary = secondary or self._mix_color(resolved_primary, PANEL, 0.3)
+        resolved_accent = accent or resolved_secondary
+        locked_secondary = False
+
+        if sport == "MLB":
+            override = MLB_BG_COLOR_OVERRIDES.get(tri_key)
+            if override:
+                resolved_primary, resolved_secondary = override
+                locked_secondary = True
+        elif sport == "NHL":
+            override = NHL_BG_COLOR_OVERRIDES.get(tri_key)
+            if override:
+                resolved_primary, resolved_secondary = override
+                locked_secondary = True
+
+        contrast = self._color_contrast_ratio(resolved_primary, resolved_secondary)
+        lum_gap = abs(self._color_luminance(resolved_primary) - self._color_luminance(resolved_secondary))
+        hue_gap = self._color_hue_distance(resolved_primary, resolved_secondary)
+        if not locked_secondary and (contrast < 1.55 or lum_gap < 0.055 or (hue_gap < 0.05 and contrast < 1.9)):
+            resolved_secondary = self._derive_panel_secondary(resolved_primary)
+
+        accent_contrast = self._color_contrast_ratio(resolved_primary, resolved_accent)
+        accent_lum_gap = abs(self._color_luminance(resolved_primary) - self._color_luminance(resolved_accent))
+        accent_hue_gap = self._color_hue_distance(resolved_primary, resolved_accent)
+        if accent_contrast < 1.25 or (accent_hue_gap < 0.04 and accent_lum_gap < 0.09):
+            resolved_accent = self._derive_panel_accent(resolved_primary)
+
+        return resolved_primary, resolved_secondary, resolved_accent
 
     def _with_alpha(self, color_hex: str, alpha: float) -> str:
         try:
@@ -7684,8 +7830,14 @@ class ScoreSourceWindow(QMainWindow):
         )
 
     def apply_team_logo_style(self, box: CircularLogoGlow, tri: str, primary: str, accent: str):
-        secondary = getattr(self.backend, "TEAM_SECONDARY_COLORS", {}).get(tri, self._mix_color(primary, BG, 0.4))
-        box.set_colors(primary, secondary, accent)
+        tri_key = (tri or "").upper()
+        secondary = getattr(self.backend, "TEAM_SECONDARY_COLORS", {}).get(tri_key, self._mix_color(primary, BG, 0.4))
+        if self.sport_name.upper() == "NHL":
+            secondary = getattr(self.backend, "TEAM_ALT_COLORS", {}).get(tri_key, secondary)
+        resolved_primary, resolved_secondary, resolved_accent = self._resolve_team_theme_colors(
+            tri_key, primary, secondary, accent
+        )
+        box.set_colors(resolved_primary, resolved_secondary, resolved_accent)
         scale = LOGO_SCALE_OVERRIDES.get(tri, DEFAULT_LOGO_SCALE)
         box.set_logo_scale(scale)
         box.set_logo_y_offset(LOGO_Y_OFFSET_OVERRIDES.get(tri, 0))

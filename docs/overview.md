@@ -10,7 +10,7 @@ LED-focused scoreboard (1280x400) with multi-sport coverage. This doc summarizes
 - Legacy UI: `pyside/` contains earlier PySide layers (kept for compatibility).
 
 ## Player cards
-- Shared card shell lives in `scoresource/ui.py` and now uses the same condensed layout across sports.
+- Shared card shell lives in `scoresource/ui/window.py` and now uses the same condensed layout across sports.
 - Hero row is split into three anchors: player headshot on one side, condensed identity/meta text in the middle, and team logo on the opposite side.
 - Card body is denser by design: `Profile` and `Game Stats` render side by side, while `Career Stats` spans below as compact chips.
 - The old `Profile loaded from API` status text was removed to keep the card visually quiet.

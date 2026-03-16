@@ -3,7 +3,7 @@
 # Avoid importing the heavy Qt stack (PySide6) at package import time so
 # consumers can import data-only submodules without GUI dependencies.
 def main() -> None:
-    from scoresource.main import main as _main
+    from .main import main as _main
 
     return _main()
 
