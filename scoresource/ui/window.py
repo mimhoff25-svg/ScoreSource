@@ -74,7 +74,7 @@ GAME_LOGO_SIZE = 36
 
 from .. import nba as default_backend
 from ..logic import ScoreSourceLogic
-from ..registry import canonicalize_sport_name
+from ..sports_meta import canonicalize_sport_name
 from ..realtime import RealTimeGameState
 from ..common.utils import extract_three_point_made, format_player_initial_name, iso_to_local
 

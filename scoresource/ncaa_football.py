@@ -4,8 +4,10 @@ from typing import Any, Dict, List
 
 from .sports import ncaa_football as backend
 from .common.lineups import apply_starting_lineups
+from .sports_meta import display_name_for_sport
 
-sport_name = "NCAA Football"
+SPORT_KEY = "NCAA FOOTBALL"
+sport_name = display_name_for_sport(SPORT_KEY)
 sport_table_headers = backend.sport_table_headers
 
 TEAM_PRIMARY_COLORS: Dict[str, str] = backend.TEAM_PRIMARY_COLORS
@@ -72,7 +74,7 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
     home = box.get("home") or {"teamName": "HOME", "teamTricode": "HME", "score": 0, "players": []}
     away = box.get("away") or {"teamName": "AWAY", "teamTricode": "AWY", "score": 0, "players": []}
     header = _normalize_status_text(box.get("header") or game.get("gameStatusText", ""))
-    apply_starting_lineups("NCAA Football", home, away)
+    apply_starting_lineups(SPORT_KEY, home, away)
     return {
         "game": game,
         "home": home,

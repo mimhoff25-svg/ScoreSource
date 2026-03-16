@@ -1,15 +1,17 @@
-"""Sports registry exports.
+"""Normalized per-sport backend modules for ScoreSource.
 
-We avoid importing Qt-backed UI classes at package import time so the data
-fetchers (scoresource.sports.nba, etc.) can be used without PySide6 present.
+This package intentionally stays lightweight. The active application path
+loads sport metadata from ``scoresource.registry`` and imports individual
+backend modules directly, e.g. ``scoresource.sports.nba``.
 """
 
-__all__ = ["SportConfig", "get_config", "get_sport_names", "load_backend", "icon_map"]
-
-
-def __getattr__(name):
-    if name in __all__:
-        from . import registry as _registry
-
-        return getattr(_registry, name)
-    raise AttributeError(name)
+__all__ = [
+    "mlb",
+    "mls",
+    "nba",
+    "ncaa_basketball",
+    "ncaa_football",
+    "nfl",
+    "nhl",
+    "template_sport",
+]

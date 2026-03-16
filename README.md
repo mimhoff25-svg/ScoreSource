@@ -51,7 +51,7 @@ Targeted regression coverage for the recent card/profile work lives in `tests/te
 
 ### Repo Map
 - `scoresource/` — core app, sport backends, UI, common utilities
-- `pyside/` — legacy PySide UI pieces
+- `pyside/` — legacy compatibility shims for older PySide entrypoints
 - `tests/` — smoke tests for backends/logic
 - `Change log_IMPROVEMENTS_NEEDED.md` — working log of fixes and gaps
 - `CHANGELOG.md` — release history

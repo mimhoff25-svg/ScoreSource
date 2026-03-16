@@ -24,7 +24,7 @@ import requests
 from .common.lineups import ESPN_SPORT_PATH
 from .common.utils import iso_to_local
 from .common.timefmt import format_start_time
-from .registry import canonicalize_sport_name
+from .sports_meta import canonicalize_sport_name
 from . import nba, nfl, mlb, nhl, ncaa_football, ncaa_basketball, mls
 from .sports import (
     mlb as sports_mlb,

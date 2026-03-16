@@ -1,12 +1,9 @@
-"""Launcher for ScoreSource multi-sport (delegates to scoresource.main)."""
-
-import sys
-from PySide6.QtWidgets import QApplication
+"""Legacy launcher that delegates to ``scoresource.main``."""
 
 from scoresource.main import main as run_main
 
 
-def main():
+def main() -> None:
     run_main()
 
 

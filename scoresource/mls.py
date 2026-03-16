@@ -4,8 +4,10 @@ from typing import Any, Dict, List
 
 from .sports import mls as backend
 from .common.lineups import apply_starting_lineups
+from .sports_meta import display_name_for_sport
 
-sport_name = "MLS"
+SPORT_KEY = "MLS"
+sport_name = display_name_for_sport(SPORT_KEY)
 sport_table_headers = backend.sport_table_headers
 
 TEAM_PRIMARY_COLORS: Dict[str, str] = backend.TEAM_PRIMARY_COLORS
@@ -37,7 +39,7 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
     home = box.get("home") or {"teamName": "HOME", "teamTricode": "HME", "score": 0, "players": []}
     away = box.get("away") or {"teamName": "AWAY", "teamTricode": "AWY", "score": 0, "players": []}
     header = box.get("header") or game.get("gameStatusText") or "Scheduled"
-    apply_starting_lineups("MLS", home, away)
+    apply_starting_lineups(SPORT_KEY, home, away)
     return {
         "game": game,
         "home": home,
@@ -64,10 +66,4 @@ def load_logo(team_id: str | None, tricode: str | None = "") -> bytes | None:
 
 
 def build_player_rows(team: Dict[str, Any]) -> List[List[str]]:
-    tri = (team.get("teamTricode") or team.get("teamName") or "TEAM").upper()
-    score = safe_score(team)
-    record = team.get("record") or team.get("recordShort") or "--"
-    return [
-        [tri, "Score", str(score)],
-        [tri, "Record", record],
-    ]
+    return backend.build_player_rows(team)

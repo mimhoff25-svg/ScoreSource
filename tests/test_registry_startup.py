@@ -1,6 +1,12 @@
 import pytest
 
 import scoresource.main as main_module
+import pyside.logic as legacy_logic
+import pyside.realtime as legacy_realtime
+import pyside.ui as legacy_ui
+from scoresource.logic import ScoreSourceLogic as ActiveLogic
+from scoresource.realtime import RealTimeGameState as ActiveRealTimeGameState
+from scoresource.ui import ScoreSourceWindow
 from scoresource.logic import ScoreSourceLogic
 from scoresource.registry import (
     canonicalize_sport_name,
@@ -90,3 +96,17 @@ def test_main_smoke(monkeypatch):
     assert events["exec_called"] is True
     assert events["window_kwargs"]["sport_name"] == "NBA"
     assert events["window_kwargs"]["logic"].current_sport == "NBA"
+
+
+def test_sports_package_imports_cleanly():
+    import scoresource.sports as sports_pkg
+    from scoresource.sports import nba as sports_nba
+
+    assert "nba" in sports_pkg.__all__
+    assert callable(sports_nba.fetch_scores)
+
+
+def test_legacy_pyside_shims_point_to_active_modules():
+    assert issubclass(legacy_logic.ScoreSourceLogic, ActiveLogic)
+    assert legacy_realtime.RealTimeGameState is ActiveRealTimeGameState
+    assert legacy_ui.ScoreSourceWindow is ScoreSourceWindow

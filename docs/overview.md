@@ -7,7 +7,7 @@ LED-focused scoreboard (1280x400) with multi-sport coverage. This doc summarizes
 - Sports backends: `scoresource/sports/` per-league modules wrap ESPN-style APIs; unified game model feeds UI.
 - Common utilities: `scoresource/common/` for time formatting, logging, colors, lineups, and helpers.
 - Core runtime: `scoresource/logic.py` orchestrates fetches, normalization, and fallbacks; `scoresource/realtime.py` houses live hooks.
-- Legacy UI: `pyside/` contains earlier PySide layers (kept for compatibility).
+- Legacy entrypoints: `pyside/` now acts as a compatibility shim layer over the active `scoresource` app.
 
 ## Player cards
 - Shared card shell lives in `scoresource/ui/window.py` and now uses the same condensed layout across sports.
