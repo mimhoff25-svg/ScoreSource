@@ -1067,33 +1067,63 @@ class CenterPanel(QFrame):
 
 class PlayerCardDialog(QDialog):
     STAT_MAX = 16
-    HERO_HEADSHOT_SIZE = 96
-    HERO_TEAM_LOGO_SIZE = 54
+    GAME_STATS_MAX = 6
+    PROFILE_STATS_MAX = 5
+    CAREER_STATS_MAX = 8
+    HERO_HEADSHOT_SIZE = 104
+    HERO_TEAM_LOGO_SIZE = 34
+    HERO_STAT_MIN_WIDTH = 86
+    HERO_STAT_MAX_WIDTH = 124
     PROFILE_COLUMNS = 2
-    GAME_STATS_COLUMNS = 2
+    GAME_STATS_COLUMNS = 3
     CAREER_STATS_COLUMNS = 4
+    HOT_STATE_THRESHOLDS: Dict[str, Dict[str, float]] = {
+        "NBA": {"PTS": 20, "REB": 10, "AST": 8, "STL": 3, "BLK": 3, "+/-": 10},
+        "NCAA BASKETBALL": {"PTS": 20, "REB": 10, "AST": 8, "STL": 3, "BLK": 3},
+        "NFL": {"YDS": 100, "TD": 2, "REC": 8, "CAR": 15, "TKL": 10, "SACK": 2, "INT": 1},
+        "NCAA FOOTBALL": {"YDS": 100, "TD": 2, "REC": 8, "CAR": 15, "TKL": 10, "SACK": 2, "INT": 1},
+        "NHL": {"PTS": 3, "G": 2, "A": 2, "SOG": 5, "SV": 25},
+        "MLB": {"H": 3, "RBI": 3, "HR": 1, "SB": 2, "SO": 7, "SV": 1},
+        "MLS": {"G": 1, "A": 2, "SOG": 4, "SV": 6},
+    }
+    HERO_STAT_PRIORITY: Dict[str, List[str]] = {
+        "NBA": ["PTS", "REB", "AST", "+/-", "STL", "BLK"],
+        "NCAA BASKETBALL": ["PTS", "REB", "AST", "STL", "BLK", "PF"],
+        "NFL": ["TD", "YDS", "REC", "CAR", "TKL", "SACK", "INT"],
+        "NCAA FOOTBALL": ["TD", "YDS", "REC", "CAR", "TKL", "SACK", "INT"],
+        "NHL": ["PTS", "G", "A", "SOG", "SV", "SV%"],
+        "MLB": ["RBI", "H", "HR", "R", "SB", "SO", "IP", "SV", "AVG", "OPS"],
+        "MLS": ["G", "A", "SOG", "SV", "MIN"],
+    }
+    SNAPSHOT_HERO_PRIORITY: Dict[str, List[str]] = {
+        "NBA": ["PTS", "REB", "AST", "FG%", "3P%", "FT%"],
+        "NCAA BASKETBALL": ["PTS", "REB", "AST", "FG%", "3P%", "FT%"],
+        "NFL": ["PASS YDS", "PASS TD", "RUSH YDS", "REC YDS", "REC TD", "RUSH TD", "INT"],
+        "NCAA FOOTBALL": ["PASS YDS", "PASS TD", "RUSH YDS", "REC YDS", "REC TD", "RUSH TD", "INT"],
+        "NHL": ["PTS", "G", "A", "SOG", "SV%", "SV"],
+        "MLB": ["OPS", "AVG", "HR", "RBI", "H", "ERA", "SV"],
+        "MLS": ["G", "A", "SOG", "MIN", "SV"],
+    }
 
     def __init__(self, context: Dict[str, Any], parent: QWidget | None = None):
         super().__init__(parent)
         self._context = dict(context or {})
         accent = str(self._context.get("teamColor") or ACCENT)
+        self._row_stats = dict(self._context.get("rowStats") or {})
+        self._profile: Dict[str, Any] = {}
+        self._stat_source_mode = "game"
+        self._palette = self._resolve_palette(accent)
         self.setWindowTitle("Player Card")
         self.setModal(False)
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowFlag(Qt.Tool, True)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.setFixedSize(560, 336)
-        self.setStyleSheet(self._build_style(accent))
+        self.setStyleSheet(self._build_style())
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
-
-        hero = QFrame()
-        hero.setObjectName("hero")
-        hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(10, 8, 10, 8)
-        hero_layout.setSpacing(0)
+        root.setContentsMargins(4, 6, 6, 6)
+        root.setSpacing(0)
 
         self.headshot_label = QLabel()
         self.headshot_label.setObjectName("headshot")
@@ -1101,15 +1131,28 @@ class PlayerCardDialog(QDialog):
         self.headshot_label.setAlignment(Qt.AlignCenter)
         self._headshot_loaded = False
 
+        self.jersey_badge = QLabel("")
+        self.jersey_badge.setObjectName("jerseyBadge")
+        self.jersey_badge.setAlignment(Qt.AlignCenter)
+
         self.team_logo_label = QLabel()
         self.team_logo_label.setObjectName("teamLogo")
         self.team_logo_label.setFixedSize(self.HERO_TEAM_LOGO_SIZE, self.HERO_TEAM_LOGO_SIZE)
         self.team_logo_label.setAlignment(Qt.AlignCenter)
 
-        self.name_label = QLabel(self._context.get("playerName") or "Player")
+        self.name_label = QLabel("")
         self.name_label.setObjectName("playerName")
         self.meta_label = QLabel("")
         self.meta_label.setObjectName("playerMeta")
+        self.status_badge = QLabel("")
+        self.status_badge.setObjectName("statusBadge")
+        self.status_badge.setVisible(False)
+        self.status_badge.setAlignment(Qt.AlignCenter)
+
+        self.hero_stat_value = QLabel("--")
+        self.hero_stat_value.setObjectName("heroStatValue")
+        self.hero_stat_label = QLabel("STAT")
+        self.hero_stat_label.setObjectName("heroStatLabel")
 
         close_button = QToolButton()
         close_button.setObjectName("cardClose")
@@ -1117,183 +1160,378 @@ class PlayerCardDialog(QDialog):
         close_button.setAutoRaise(True)
         close_button.clicked.connect(self.close)
 
-        hero_top = QHBoxLayout()
-        hero_top.setContentsMargins(0, 0, 0, 0)
-        hero_top.setSpacing(10)
-        hero_top.addWidget(self.headshot_label, 0, Qt.AlignTop)
-        text_col = QVBoxLayout()
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(1)
-        text_col.addWidget(self.name_label)
-        text_col.addWidget(self.meta_label)
-        text_col.addStretch(1)
-        hero_top.addLayout(text_col, 1)
-        right_col = QVBoxLayout()
-        right_col.setContentsMargins(0, 0, 0, 0)
-        right_col.setSpacing(4)
-        right_col.addWidget(close_button, 0, Qt.AlignTop | Qt.AlignRight)
-        right_col.addWidget(self.team_logo_label, 0, Qt.AlignRight | Qt.AlignVCenter)
-        right_col.addStretch(1)
-        hero_top.addLayout(right_col, 0)
-        hero_layout.addLayout(hero_top)
-        root.addWidget(hero)
-
         self.content_scroll = QScrollArea()
         self.content_scroll.setObjectName("cardScroll")
         self.content_scroll.setWidgetResizable(True)
         self.content_scroll.setFrameShape(QFrame.NoFrame)
         root.addWidget(self.content_scroll, 1)
 
-        body = QWidget()
-        self.content_scroll.setWidget(body)
-        body_layout = QGridLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setHorizontalSpacing(6)
-        body_layout.setVerticalSpacing(6)
-        body_layout.setColumnStretch(0, 1)
-        body_layout.setColumnStretch(1, 1)
+        self.surface = QFrame()
+        self.surface.setObjectName("cardSurface")
+        self.surface.setProperty("cardState", "default")
+        self.content_scroll.setWidget(self.surface)
 
-        bio_frame = QFrame()
-        bio_frame.setObjectName("cardSection")
-        bio_wrap = QVBoxLayout(bio_frame)
-        bio_wrap.setContentsMargins(8, 6, 8, 6)
-        bio_wrap.setSpacing(4)
-        bio_title = QLabel("Profile")
-        bio_title.setObjectName("sectionTitle")
-        bio_wrap.addWidget(bio_title)
+        shadow = QGraphicsDropShadowEffect(self.surface)
+        shadow.setBlurRadius(18)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 130))
+        self.surface.setGraphicsEffect(shadow)
+
+        body_layout = QVBoxLayout(self.surface)
+        body_layout.setContentsMargins(10, 10, 12, 12)
+        body_layout.setSpacing(8)
+
+        hero_row = QHBoxLayout()
+        hero_row.setContentsMargins(0, 0, 0, 0)
+        hero_row.setSpacing(8)
+
+        self.identity_wrap = QFrame()
+        self.identity_wrap.setObjectName("identityWrap")
+        identity_layout = QGridLayout(self.identity_wrap)
+        identity_layout.setContentsMargins(0, 0, 2, 4)
+        identity_layout.setHorizontalSpacing(4)
+        identity_layout.setVerticalSpacing(2)
+        self.identity_rail = QFrame()
+        self.identity_rail.setObjectName("identityRail")
+        self.identity_rail.setFixedWidth(4)
+        identity_layout.addWidget(self.identity_rail, 0, 0, 3, 1)
+        identity_layout.addWidget(self.team_logo_label, 0, 1, 1, 1, Qt.AlignLeft | Qt.AlignTop)
+        identity_layout.addWidget(self.headshot_label, 1, 1, 1, 1, Qt.AlignLeft | Qt.AlignTop)
+        identity_layout.setRowStretch(2, 1)
+        hero_row.addWidget(self.identity_wrap, 0, Qt.AlignTop)
+
+        center_col = QVBoxLayout()
+        center_col.setContentsMargins(6, 11, 0, 0)
+        center_col.setSpacing(4)
+
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(6)
+        title_row.addWidget(self.jersey_badge, 0, Qt.AlignVCenter)
+        title_row.addWidget(self.name_label, 1, Qt.AlignVCenter)
+        center_col.addLayout(title_row)
+
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(6)
+        meta_row.addWidget(self.meta_label, 1, Qt.AlignVCenter)
+        center_col.addLayout(meta_row)
+
         self.bio_grid = QGridLayout()
-        self.bio_grid.setHorizontalSpacing(5)
-        self.bio_grid.setVerticalSpacing(5)
-        bio_wrap.addLayout(self.bio_grid)
-        body_layout.addWidget(bio_frame, 0, 0)
+        self.bio_grid.setContentsMargins(26, 5, 0, 0)
+        self.bio_grid.setHorizontalSpacing(10)
+        self.bio_grid.setVerticalSpacing(4)
+        center_col.addLayout(self.bio_grid)
+        center_col.addStretch(1)
+        hero_row.addLayout(center_col, 1)
 
-        stat_frame = QFrame()
-        stat_frame.setObjectName("cardSection")
-        stat_layout = QVBoxLayout(stat_frame)
-        stat_layout.setContentsMargins(8, 6, 8, 6)
-        stat_layout.setSpacing(4)
-        stat_title = QLabel("Game Stats")
-        stat_title.setObjectName("sectionTitle")
-        stat_layout.addWidget(stat_title)
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(6)
+        right_top = QHBoxLayout()
+        right_top.setContentsMargins(0, 0, 0, 0)
+        right_top.setSpacing(6)
+        right_top.addStretch(1)
+        right_top.addWidget(close_button, 0, Qt.AlignTop | Qt.AlignRight)
+        right_col.addLayout(right_top)
+        self.hero_stat_wrap = QFrame()
+        self.hero_stat_wrap.setObjectName("heroStatWrap")
+        self.hero_stat_wrap.setProperty("cardState", "default")
+        self.hero_stat_wrap.setMinimumWidth(self.HERO_STAT_MIN_WIDTH)
+        self.hero_stat_wrap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        hero_stat_layout = QVBoxLayout(self.hero_stat_wrap)
+        hero_stat_layout.setContentsMargins(12, 8, 12, 8)
+        hero_stat_layout.setSpacing(1)
+        hero_stat_layout.addWidget(self.hero_stat_value, 0, Qt.AlignRight | Qt.AlignVCenter)
+        hero_stat_layout.addWidget(self.hero_stat_label, 0, Qt.AlignRight | Qt.AlignVCenter)
+        right_col.addWidget(self.hero_stat_wrap, 0, Qt.AlignRight)
+        right_col.addStretch(1)
+        hero_row.addLayout(right_col, 0)
+        body_layout.addLayout(hero_row)
+
         self.stat_grid = QGridLayout()
-        self.stat_grid.setHorizontalSpacing(5)
-        self.stat_grid.setVerticalSpacing(5)
-        stat_layout.addLayout(self.stat_grid)
-        body_layout.addWidget(stat_frame, 0, 1)
+        self.stat_grid.setHorizontalSpacing(6)
+        self.stat_grid.setVerticalSpacing(6)
+        body_layout.addLayout(self.stat_grid)
 
-        career_frame = QFrame()
-        career_frame.setObjectName("cardSection")
-        career_layout = QVBoxLayout(career_frame)
-        career_layout.setContentsMargins(8, 6, 8, 6)
-        career_layout.setSpacing(4)
-        career_title = QLabel("Career Stats")
+        career_divider = QFrame()
+        career_divider.setObjectName("cardDivider")
+        career_divider.setFixedHeight(1)
+        body_layout.addWidget(career_divider)
+
+        career_title = QLabel("CAREER")
         career_title.setObjectName("sectionTitle")
-        career_layout.addWidget(career_title)
+        body_layout.addWidget(career_title)
         self.career_grid = QGridLayout()
-        self.career_grid.setHorizontalSpacing(5)
-        self.career_grid.setVerticalSpacing(5)
-        career_layout.addLayout(self.career_grid)
-        body_layout.addWidget(career_frame, 1, 0, 1, 2)
-        body_layout.setRowStretch(1, 1)
+        self.career_grid.setHorizontalSpacing(6)
+        self.career_grid.setVerticalSpacing(6)
+        body_layout.addLayout(self.career_grid)
+        body_layout.addStretch(1)
 
-        self._refresh_meta()
+        self._set_name_text(str(self._context.get("playerName") or "Player"))
         self.set_headshot(None)
         self.set_team_logo(None)
+        self._refresh_meta()
         self._render_bio({})
-        self._render_stats(dict(self._context.get("rowStats") or {}))
+        self._render_stats(self._row_stats)
         self._render_career_stats({})
+        self._apply_card_state()
 
-    def _build_style(self, accent: str) -> str:
-        col = QColor(accent)
-        base = QColor(10, 16, 28)
-        deep = QColor(5, 9, 16)
-        hero_bg = QColor(col)
-        hero_bg.setAlpha(44)
-        border = QColor(col)
-        border.setAlpha(160)
+    @classmethod
+    def _as_color(cls, raw: Any, fallback: str) -> QColor:
+        color = QColor(str(raw or ""))
+        if color.isValid():
+            return color
+        return QColor(fallback)
+
+    @classmethod
+    def _blend(cls, color_hex: Any, base_hex: Any, factor: float) -> str:
+        factor = max(0.0, min(1.0, float(factor)))
+        color = cls._as_color(color_hex, ACCENT)
+        base = cls._as_color(base_hex, BG)
+        red = round(base.red() + ((color.red() - base.red()) * factor))
+        green = round(base.green() + ((color.green() - base.green()) * factor))
+        blue = round(base.blue() + ((color.blue() - base.blue()) * factor))
+        return QColor(red, green, blue).name()
+
+    @classmethod
+    def _rgba(cls, color_hex: Any, alpha: float) -> str:
+        color = cls._as_color(color_hex, ACCENT)
+        alpha_value = max(0.0, min(1.0, float(alpha)))
+        return f"rgba({color.red()}, {color.green()}, {color.blue()}, {alpha_value:.3f})"
+
+    @classmethod
+    def _color_luminance(cls, color_hex: Any) -> float:
+        color = cls._as_color(color_hex, BG)
+
+        def _channel(value: int) -> float:
+            srgb = value / 255.0
+            if srgb <= 0.03928:
+                return srgb / 12.92
+            return ((srgb + 0.055) / 1.055) ** 2.4
+
+        return (
+            (0.2126 * _channel(color.red()))
+            + (0.7152 * _channel(color.green()))
+            + (0.0722 * _channel(color.blue()))
+        )
+
+    def _resolve_palette(self, accent: str) -> Dict[str, str]:
+        accent_color = self._as_color(accent, ACCENT).name()
+        accent_soft = self._blend(accent_color, "#edf5ff", 0.40)
+        return {
+            "accent": accent_color,
+            "accent_soft": accent_soft,
+            "surface_top": self._blend(accent_color, "#101929", 0.18),
+            "surface_mid": self._blend(accent_color, "#0b1320", 0.08),
+            "surface_deep": "#07111a",
+            "surface_bench": self._blend(accent_color, "#0a111b", 0.05),
+            "surface_hot": self._blend(accent_color, "#132137", 0.24),
+            "border": self._blend(accent_color, "#4a5e79", 0.28),
+            "border_soft": self._blend(accent_color, "#6c84a2", 0.20),
+            "chip": self._blend(accent_color, "#101927", 0.10),
+            "chip_alt": self._blend(accent_color, "#0d1624", 0.07),
+            "hero": self._blend(accent_color, "#152337", 0.30),
+            "hero_hot": self._blend(accent_color, "#1a2c45", 0.42),
+            "text": "#f3f8ff",
+            "muted": "#9db1c9",
+            "muted_soft": "#7f95af",
+            "success": "#47d1a0",
+            "warning": "#f2b651",
+            "danger": "#ff7474",
+        }
+
+    def _build_style(self) -> str:
+        palette = self._palette
         return f"""
         QDialog {{
-            background-color: {base.name()};
-            border: 1px solid {border.name(QColor.HexArgb)};
-            border-radius: 12px;
-        }}
-        QFrame#hero {{
-            background-color: {hero_bg.name(QColor.HexArgb)};
-            border: 1px solid {border.name(QColor.HexArgb)};
-            border-radius: 10px;
+            background: transparent;
         }}
         QScrollArea#cardScroll {{
             background: transparent;
             border: none;
         }}
-        QFrame#cardSection {{
-            background-color: {deep.name()};
-            border: 1px solid #1b2b40;
-            border-radius: 8px;
+        QFrame#cardSurface {{
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 {self._rgba(palette["accent"], 0.18)},
+                stop:0.14 {palette["surface_top"]},
+                stop:0.55 {palette["surface_mid"]},
+                stop:1 {palette["surface_deep"]}
+            );
+            border: 1px solid {self._rgba(palette["border"], 0.82)};
+            border-radius: 16px;
         }}
-        QFrame#dataChip {{
-            background-color: #0d1727;
-            border: 1px solid #24384f;
-            border-radius: 6px;
+        QFrame#cardSurface[cardState="active"] {{
+            border: 1px solid {self._rgba(palette["accent_soft"], 0.65)};
+        }}
+        QFrame#cardSurface[cardState="hot"] {{
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 {self._rgba(palette["accent"], 0.25)},
+                stop:0.18 {palette["surface_hot"]},
+                stop:0.62 {palette["surface_mid"]},
+                stop:1 {palette["surface_deep"]}
+            );
+            border: 1px solid {self._rgba(palette["accent_soft"], 0.78)};
+        }}
+        QFrame#cardSurface[cardState="alert"] {{
+            border: 1px solid {self._rgba(palette["warning"], 0.80)};
+        }}
+        QFrame#cardSurface[cardState="bench"] {{
+            background: qlineargradient(
+                x1:0, y1:0, x2:1, y2:1,
+                stop:0 {self._rgba(palette["accent"], 0.10)},
+                stop:0.20 {palette["surface_bench"]},
+                stop:1 {palette["surface_deep"]}
+            );
+            border: 1px solid {self._rgba(palette["border_soft"], 0.62)};
+        }}
+        QFrame#identityWrap {{
+            background-color: {self._rgba(palette["chip"], 0.52)};
+            border-radius: 14px;
+        }}
+        QFrame#identityRail {{
+            background-color: {palette["accent"]};
+            border-radius: 2px;
+        }}
+        QFrame#heroStatWrap {{
+            background-color: {self._rgba(palette["hero"], 0.92)};
+            border-top: 1px solid {self._rgba(palette["accent_soft"], 0.18)};
+            border-radius: 12px;
+        }}
+        QFrame#heroStatWrap[cardState="hot"] {{
+            background-color: {self._rgba(palette["hero_hot"], 0.98)};
+            border-top: 1px solid {self._rgba(palette["accent_soft"], 0.42)};
+        }}
+        QFrame#heroStatWrap[cardState="alert"] {{
+            background-color: {self._rgba(palette["warning"], 0.14)};
+            border-top: 1px solid {self._rgba(palette["warning"], 0.34)};
+        }}
+        QFrame#heroStatWrap[cardState="bench"] {{
+            background-color: {self._rgba(palette["chip_alt"], 0.95)};
         }}
         QLabel#playerName {{
-            color: #f2f7ff;
-            font-size: 20px;
+            color: {palette["text"]};
             font-weight: 900;
             letter-spacing: 0.2px;
         }}
         QLabel#playerMeta {{
-            color: #cfe2ff;
-            font-size: 10px;
+            color: {palette["muted"]};
+            font-size: 11px;
             font-weight: 600;
         }}
+        QLabel#statusBadge {{
+            color: {palette["text"]};
+            font-size: 9px;
+            font-weight: 800;
+            border-radius: 9px;
+            padding: 2px 7px;
+            background-color: {self._rgba(palette["border"], 0.30)};
+            border: 1px solid {self._rgba(palette["border_soft"], 0.45)};
+        }}
         QLabel#playerStatus {{
-            color: #9ec7ec;
+            color: {palette["muted_soft"]};
             font-size: 9px;
             font-weight: 600;
         }}
         QLabel#headshot {{
-            background-color: #122034;
-            border: 2px solid #2a4361;
-            border-radius: 48px;
-            color: #dbe9ff;
+            background-color: {self._rgba(palette["surface_mid"], 0.92)};
+            border: 1px solid {self._rgba(palette["border_soft"], 0.50)};
+            border-radius: 52px;
+            color: {palette["text"]};
             font-size: 28px;
             font-weight: 900;
         }}
         QLabel#teamLogo {{
-            background-color: rgba(8, 15, 27, 0.55);
-            border: 1px solid #2a4361;
-            border-radius: 10px;
-            color: #dbe9ff;
-            font-size: 12px;
+            background-color: {self._rgba(palette["chip_alt"], 0.60)};
+            border-radius: 8px;
+            border: none;
+            color: {palette["text"]};
+            font-size: 10px;
             font-weight: 800;
             padding: 2px;
         }}
+        QLabel#jerseyBadge {{
+            color: {palette["text"]};
+            background-color: {self._rgba(palette["accent"], 0.24)};
+            border: 1px solid {self._rgba(palette["accent_soft"], 0.42)};
+            border-radius: 11px;
+            font-size: 15px;
+            font-weight: 900;
+            padding: 2px 8px;
+            min-width: 36px;
+        }}
+        QLabel#heroStatValue {{
+            color: {palette["text"]};
+            font-size: 31px;
+            font-weight: 900;
+            letter-spacing: 0.3px;
+        }}
+        QLabel#heroStatLabel {{
+            color: {palette["muted"]};
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 0.9px;
+        }}
         QToolButton#cardClose {{
-            color: #d0e2ff;
+            color: {palette["muted"]};
             font-size: 13px;
             font-weight: 900;
-            border: 1px solid #355173;
-            border-radius: 7px;
-            background: #0f1d30;
-            min-width: 16px;
-            min-height: 16px;
-            max-width: 16px;
-            max-height: 16px;
+            border: none;
+            border-radius: 9px;
+            background: {self._rgba(palette["chip_alt"], 0.38)};
+            min-width: 18px;
+            min-height: 18px;
+            max-width: 18px;
+            max-height: 18px;
         }}
         QLabel#sectionTitle {{
-            color: #dce9ff;
-            font-size: 11px;
+            color: {palette["muted_soft"]};
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 1.2px;
+        }}
+        QFrame#cardDivider {{
+            background-color: {self._rgba(palette["border_soft"], 0.18)};
+        }}
+        QFrame#statChip {{
+            background-color: {self._rgba(palette["chip"], 0.92)};
+            border-radius: 12px;
+        }}
+        QFrame#infoChip {{
+            background: transparent;
+            border: none;
+        }}
+        QFrame#careerChip {{
+            background-color: {self._rgba(palette["chip_alt"], 0.38)};
+            border-radius: 9px;
+        }}
+        QLabel#chipKey {{
+            color: {palette["muted"]};
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+        }}
+        QLabel#chipValue {{
+            color: {palette["text"]};
+            font-size: 17px;
+            font-weight: 900;
+        }}
+        QLabel#careerChipValue {{
+            color: {palette["text"]};
+            font-size: 13px;
             font-weight: 800;
         }}
-        QLabel#fieldKey {{
-            color: #8da5c5;
+        QLabel#infoKey {{
+            color: {palette["muted_soft"]};
             font-size: 8px;
-            font-weight: 700;
+            font-weight: 800;
+            letter-spacing: 0.6px;
         }}
-        QLabel#fieldVal {{
-            color: #f3f8ff;
-            font-size: 9px;
+        QLabel#infoValue {{
+            color: {palette["text"]};
+            font-size: 11px;
             font-weight: 600;
         }}
         """
@@ -1301,22 +1539,246 @@ class PlayerCardDialog(QDialog):
     def _sport_code(self) -> str:
         return str(self._context.get("sport") or "").strip().upper()
 
+    def _set_name_text(self, raw_name: str) -> None:
+        text = str(raw_name or "Player").strip() or "Player"
+        self.name_label.setText(text)
+        font = QFont(self.name_label.font())
+        font.setBold(True)
+        if len(text) > 24:
+            font.setPointSize(17)
+        elif len(text) > 19:
+            font.setPointSize(19)
+        else:
+            font.setPointSize(22)
+        self.name_label.setFont(font)
+
+    def _refresh_hero_stat_wrap(self) -> None:
+        value_text = str(self.hero_stat_value.text() or "--").strip() or "--"
+        label_text = str(self.hero_stat_label.text() or "STAT").strip() or "STAT"
+        value_width = QFontMetrics(self.hero_stat_value.font()).horizontalAdvance(value_text)
+        label_width = QFontMetrics(self.hero_stat_label.font()).horizontalAdvance(label_text)
+        target = max(
+            self.HERO_STAT_MIN_WIDTH,
+            min(self.HERO_STAT_MAX_WIDTH, max(value_width, label_width) + 32),
+        )
+        self.hero_stat_wrap.setFixedWidth(int(target))
+
+    def _refresh_widget_style(self, widget: QWidget) -> None:
+        style = widget.style()
+        style.unpolish(widget)
+        style.polish(widget)
+        widget.update()
+
+    def _set_opacity(self, widget: QWidget, value: float) -> None:
+        effect = widget.graphicsEffect()
+        if effect is not None and not isinstance(effect, QGraphicsOpacityEffect):
+            return
+        if not isinstance(effect, QGraphicsOpacityEffect):
+            effect = QGraphicsOpacityEffect(widget)
+            widget.setGraphicsEffect(effect)
+        effect.setOpacity(max(0.0, min(1.0, float(value))))
+
+    def _truthy_flag(self, raw: Any) -> bool:
+        if isinstance(raw, bool):
+            return raw
+        if isinstance(raw, (int, float)):
+            return raw != 0
+        if isinstance(raw, str):
+            return raw.strip().lower() in {"1", "true", "yes", "y", "active", "starter"}
+        return False
+
+    def _stat_text(self, *labels: str) -> str:
+        for label in labels:
+            value = str(self._row_stats.get(label) or "").strip()
+            if value:
+                return value
+        return ""
+
+    def _parse_stat_number(self, raw: Any) -> float | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        match = re.search(r"[-+]?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except Exception:
+            return None
+
+    def _current_status_text(self) -> str:
+        for source in (self._profile, self._context.get("playerData") or {}, self._context):
+            if not isinstance(source, dict):
+                continue
+            status = str(source.get("status") or "").strip()
+            if status:
+                return status
+        return ""
+
+    def _is_player_active(self) -> bool:
+        player = self._context.get("playerData")
+        if not isinstance(player, dict):
+            return False
+        stats = player.get("statistics") or {}
+        for key in ("isOnCourt", "onCourt", "oncourt"):
+            if key in stats and stats.get(key) not in (None, ""):
+                return self._truthy_flag(stats.get(key))
+        for key in ("active", "starter", "onCourt", "oncourt", "isOnCourt"):
+            if key in player and player.get(key) not in (None, ""):
+                return self._truthy_flag(player.get(key))
+        return False
+
+    def _is_player_bench_or_inactive(self) -> bool:
+        status_text = self._current_status_text().lower()
+        if any(token in status_text for token in ("bench", "inactive", "out", "dnp", "scratch", "inj")):
+            return True
+        player = self._context.get("playerData")
+        if not isinstance(player, dict):
+            return False
+        stats = player.get("statistics") or {}
+        for key in ("isOnCourt", "onCourt", "oncourt"):
+            if key in stats and stats.get(key) not in (None, ""):
+                return not self._truthy_flag(stats.get(key))
+        if "active" in player and player.get("active") not in (None, ""):
+            return not self._truthy_flag(player.get("active"))
+        return False
+
+    def _foul_trouble_text(self) -> str:
+        sport = self._sport_code()
+        if sport not in {"NBA", "NCAA BASKETBALL"}:
+            return ""
+        foul_text = self._stat_text("PF", "FOULS")
+        foul_count = self._parse_stat_number(foul_text)
+        if foul_count is None:
+            return ""
+        threshold = 4 if sport == "NCAA BASKETBALL" else 5
+        if foul_count >= threshold:
+            return f"FOUL {int(foul_count)}"
+        return ""
+
+    def _hero_pair(self, ordered_stats: List[tuple[str, str]]) -> tuple[str, str]:
+        if not ordered_stats:
+            return "STAT", "--"
+        by_norm = {self._normalize_stat_key(label): (str(label).upper(), value) for label, value in ordered_stats}
+        for label in self.HERO_STAT_PRIORITY.get(self._sport_code(), []):
+            pair = by_norm.get(self._normalize_stat_key(label))
+            if pair:
+                return pair
+        label, value = ordered_stats[0]
+        return str(label).upper(), value
+
+    def _snapshot_hero_pair(self, ordered_stats: List[tuple[str, str]]) -> tuple[str, str]:
+        if not ordered_stats:
+            return "STAT", "--"
+        by_norm = {self._normalize_stat_key(label): (str(label).upper(), value) for label, value in ordered_stats}
+        for label in self.SNAPSHOT_HERO_PRIORITY.get(self._sport_code(), []):
+            pair = by_norm.get(self._normalize_stat_key(label))
+            if pair:
+                return pair
+        label, value = ordered_stats[0]
+        return str(label).upper(), value
+
+    def _is_hot_player(self, hero_label: str, hero_value: str) -> bool:
+        if self._stat_source_mode != "game":
+            return False
+        thresholds = self.HOT_STATE_THRESHOLDS.get(self._sport_code(), {})
+        norm = self._normalize_stat_key(hero_label)
+        for label, threshold in thresholds.items():
+            if self._normalize_stat_key(label) != norm:
+                continue
+            value = self._parse_stat_number(hero_value)
+            if value is not None and value >= threshold:
+                return True
+        return False
+
+    def _state_payload(self) -> tuple[str, str, str]:
+        status_text = self._current_status_text().strip()
+        status_lower = status_text.lower()
+        if status_text and any(token in status_lower for token in ("out", "doubt", "question", "inj", "inactive", "suspend")):
+            return "alert", status_text.upper(), "danger"
+        foul_text = self._foul_trouble_text()
+        if foul_text:
+            return "alert", foul_text, "warning"
+        hero_label = self.hero_stat_label.text().strip()
+        hero_value = self.hero_stat_value.text().strip()
+        if hero_value and hero_value != "--" and self._is_hot_player(hero_label, hero_value):
+            return "hot", "HOT", "hot"
+        if self._is_player_active():
+            label = "ON FLOOR" if self._sport_code() in {"NBA", "NCAA BASKETBALL"} else "ACTIVE"
+            return "active", label, "success"
+        if self._is_player_bench_or_inactive():
+            return "bench", "BENCH", "muted"
+        return "default", "", "muted"
+
+    def _set_status_badge(self, text: str, tone: str) -> None:
+        self.status_badge.clear()
+        self.status_badge.setVisible(False)
+        self.status_badge.setStyleSheet("")
+
+    def _apply_card_state(self) -> None:
+        state, badge_text, badge_tone = self._state_payload()
+        self.surface.setProperty("cardState", state)
+        self.hero_stat_wrap.setProperty("cardState", state)
+        self._refresh_widget_style(self.surface)
+        self._refresh_widget_style(self.hero_stat_wrap)
+        self._set_status_badge(badge_text, badge_tone)
+
+        bench_opacity = 0.82 if state == "bench" else 1.0
+        self._set_opacity(self.identity_wrap, bench_opacity)
+        self._set_opacity(self.team_logo_label, 0.80 if state == "bench" else 1.0)
+        self._set_opacity(self.hero_stat_wrap, 0.88 if state == "bench" else 1.0)
+
+        glow = self.hero_stat_value.graphicsEffect()
+        if not isinstance(glow, QGraphicsDropShadowEffect):
+            glow = QGraphicsDropShadowEffect(self.hero_stat_value)
+            glow.setOffset(0, 0)
+            self.hero_stat_value.setGraphicsEffect(glow)
+        color = QColor(self._palette["accent_soft"])
+        if state == "hot":
+            color.setAlpha(210)
+            glow.setColor(color)
+            glow.setBlurRadius(24)
+        elif state == "active":
+            color.setAlpha(120)
+            glow.setColor(color)
+            glow.setBlurRadius(14)
+        elif state == "alert":
+            color = QColor(self._palette["warning"])
+            color.setAlpha(140)
+            glow.setColor(color)
+            glow.setBlurRadius(16)
+        else:
+            color = QColor(0, 0, 0, 0)
+            glow.setColor(color)
+            glow.setBlurRadius(0)
+
     def _refresh_meta(self) -> None:
         sport = self._sport_code()
-        jersey = str(self._context.get("jersey") or "").strip()
+        jersey = str(self._profile.get("jersey") or self._context.get("jersey") or "").strip()
         lineup_order = str(self._context.get("lineupOrder") or "").strip()
-        position = str(self._context.get("position") or "").strip()
+        position = str(self._profile.get("position") or self._context.get("position") or "").strip()
         team = str(self._context.get("teamTricode") or self._context.get("teamName") or "").strip()
+        self.jersey_badge.setText(f"#{jersey}" if jersey else (position or sport[:3] or "PLY")[:4].upper())
         parts = []
-        if sport == "MLB":
-            if jersey:
-                parts.append(f"No. {jersey}")
-            if lineup_order and lineup_order != jersey:
-                parts.append(f"BO {lineup_order}")
-        elif jersey:
-            parts.append(f"#{jersey}")
         if position:
             parts.append(position)
+        minutes = ""
+        if sport in {"NBA", "NCAA BASKETBALL", "MLS"}:
+            min_val = self._stat_text("MIN", "TIME")
+            if min_val:
+                minutes = f"{min_val} MIN"
+        elif sport == "NHL":
+            toi_val = self._stat_text("TOI", "MIN")
+            if toi_val:
+                minutes = f"{toi_val} TOI"
+        elif sport == "MLB":
+            ip_val = self._stat_text("IP")
+            if ip_val:
+                minutes = f"{ip_val} IP"
+            elif lineup_order and lineup_order != jersey:
+                parts.append(f"BO {lineup_order}")
+        if minutes:
+            parts.append(minutes)
         if team:
             parts.append(team)
         if sport and not parts:
@@ -1368,18 +1830,28 @@ class PlayerCardDialog(QDialog):
             "Shoots": shoots,
         }
         order_map = {
-            "NBA": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
-            "NCAA BASKETBALL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
-            "NFL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
-            "NCAA FOOTBALL": ["No.", "Pos", "Ht", "Wt", "Age", "Exp", "College", "Status"],
-            "NHL": ["No.", "Pos", "Ht", "Wt", "Age", "Shoots", "Born", "Status"],
-            "MLB": ["No.", "Pos", "BO", "B/T", "Ht", "Wt", "Age", "Born", "Status"],
-            "MLS": ["No.", "Pos", "Ht", "Wt", "Age", "Born", "Exp", "Status"],
+            "NBA": ["Ht", "Wt", "Age", "Exp", "College"],
+            "NCAA BASKETBALL": ["Ht", "Wt", "Age", "Exp", "College"],
+            "NFL": ["Ht", "Wt", "Age", "Exp", "College"],
+            "NCAA FOOTBALL": ["Ht", "Wt", "Age", "Exp", "College"],
+            "NHL": ["Ht", "Wt", "Age", "Shoots"],
+            "MLB": ["BO", "B/T", "Ht", "Wt", "Age"],
+            "MLS": ["Ht", "Wt", "Age", "Exp"],
         }
         order = order_map.get(
             sport,
-            ["No.", "Pos", "Ht", "Wt", "Age", "Born", "Exp", "Status"],
+            ["Ht", "Wt", "Age", "Exp"],
         )
+        extras_map = {
+            "NBA": [],
+            "NCAA BASKETBALL": [],
+            "NFL": [],
+            "NCAA FOOTBALL": [],
+            "NHL": ["DOB"],
+            "MLB": [],
+            "MLS": ["DOB"],
+        }
+        extras = extras_map.get(sport, ["DOB"])
         pairs: List[tuple[str, str]] = []
         used: set[str] = set()
         for label in order:
@@ -1388,7 +1860,7 @@ class PlayerCardDialog(QDialog):
                 continue
             pairs.append((label, val))
             used.add(label)
-        for label in ("Team", "College", "Exp", "Born", "B/T", "Shoots", "Status", "BO", "DOB"):
+        for label in extras:
             if label in used:
                 continue
             val = str(base.get(label) or "").strip()
@@ -1397,6 +1869,12 @@ class PlayerCardDialog(QDialog):
             pairs.append((label, val))
             used.add(label)
         return pairs
+
+    def _truncate_profile_value(self, value: str) -> str:
+        text = str(value or "").strip()
+        if len(text) <= 18:
+            return text
+        return text[:17].rstrip() + "…"
 
     def _render_bio(self, payload: Dict[str, Any]) -> None:
         merged = dict(payload or {})
@@ -1407,12 +1885,19 @@ class PlayerCardDialog(QDialog):
         merged.setdefault("jersey", str(self._context.get("jersey") or "").strip())
         merged.setdefault("lineupOrder", str(self._context.get("lineupOrder") or "").strip())
         merged.setdefault("position", str(self._context.get("position") or "").strip())
-        pairs = self._bio_pairs_for_sport(merged)
+        skip = {"No.", "Pos", "Team"}
+        pairs = [
+            (label, self._truncate_profile_value(value))
+            for label, value in self._bio_pairs_for_sport(merged)
+            if label not in skip
+        ]
+        pairs = pairs[: self.PROFILE_STATS_MAX]
         self._render_pairs_grid(
             self.bio_grid,
             pairs,
             empty_text="No profile details available yet.",
             columns=self.PROFILE_COLUMNS,
+            variant="info",
         )
 
     def _normalize_stat_key(self, raw: str) -> str:
@@ -1472,12 +1957,38 @@ class PlayerCardDialog(QDialog):
 
     def _render_stats(self, stats: Dict[str, Any]) -> None:
         filtered = self._ordered_stats(stats)
+        if filtered:
+            self._stat_source_mode = "game"
+            source_pairs = filtered
+        else:
+            self._stat_source_mode = "snapshot"
+            source_pairs = self._snapshot_stat_pairs()
+        if self._stat_source_mode == "snapshot":
+            hero_label, hero_value = self._snapshot_hero_pair(source_pairs)
+        else:
+            hero_label, hero_value = self._hero_pair(source_pairs)
+        self.hero_stat_value.setText(hero_value or "--")
+        self.hero_stat_label.setText(hero_label or "STAT")
+        self._refresh_hero_stat_wrap()
+        hero_norm = self._normalize_stat_key(hero_label)
+        trimmed: List[tuple[str, str]] = []
+        skipped_hero = False
+        for key, value in source_pairs:
+            norm = self._normalize_stat_key(key)
+            if not skipped_hero and norm == hero_norm and str(value).strip() == str(hero_value).strip():
+                skipped_hero = True
+                continue
+            trimmed.append((key, value))
+        trimmed = trimmed[: self.GAME_STATS_MAX]
         self._render_pairs_grid(
             self.stat_grid,
-            [(key.upper(), value) for key, value in filtered],
-            empty_text="No game stats available yet.",
+            [(key.upper(), value) for key, value in trimmed],
+            empty_text="No player snapshot available yet.",
             columns=self.GAME_STATS_COLUMNS,
+            variant="stat",
         )
+        self._refresh_meta()
+        self._apply_card_state()
 
     def _ordered_career_stats(self, stats: Dict[str, Any]) -> List[tuple[str, str]]:
         raw_pairs: List[tuple[str, str]] = []
@@ -1523,13 +2034,31 @@ class PlayerCardDialog(QDialog):
             used.add(norm)
         return ordered[: self.STAT_MAX]
 
+    def _snapshot_stat_pairs(self) -> List[tuple[str, str]]:
+        career_stats = self._profile.get("careerStats")
+        if not isinstance(career_stats, dict):
+            return []
+        skip = {
+            self._normalize_stat_key("GP"),
+            self._normalize_stat_key("APP"),
+            self._normalize_stat_key("W"),
+            self._normalize_stat_key("L"),
+        }
+        pairs: List[tuple[str, str]] = []
+        for label, value in self._ordered_career_stats(career_stats):
+            if self._normalize_stat_key(label) in skip:
+                continue
+            pairs.append((label, value))
+        return pairs
+
     def _render_career_stats(self, stats: Dict[str, Any]) -> None:
-        filtered = self._ordered_career_stats(stats)
+        filtered = self._ordered_career_stats(stats)[: self.CAREER_STATS_MAX]
         self._render_pairs_grid(
             self.career_grid,
             [(str(key).upper(), value) for key, value in filtered],
             empty_text="No career stats available yet.",
             columns=self.CAREER_STATS_COLUMNS,
+            variant="career",
         )
 
     def _clear_grid(self, layout: QGridLayout) -> None:
@@ -1537,17 +2066,30 @@ class PlayerCardDialog(QDialog):
             item = layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
+                continue
+            child_layout = item.layout()
+            if child_layout is not None:
+                while child_layout.count():
+                    child = child_layout.takeAt(0)
+                    child_widget = child.widget()
+                    if child_widget is not None:
+                        child_widget.hide()
+                        child_widget.setParent(None)
+                        child_widget.deleteLater()
 
     def apply_profile(self, profile: Dict[str, Any]) -> None:
         payload = dict(profile or {})
+        self._profile = payload
         resolved_name = (
             payload.get("displayName")
             or payload.get("fullName")
             or self._context.get("playerName")
             or "Player"
         )
-        self.name_label.setText(str(resolved_name))
+        self._set_name_text(str(resolved_name))
         if not self._headshot_loaded:
             self.set_headshot(None)
 
@@ -1556,12 +2098,14 @@ class PlayerCardDialog(QDialog):
         if payload.get("position"):
             self._context["position"] = str(payload.get("position") or "")
         self._refresh_meta()
+        self._render_stats(self._row_stats)
         self._render_bio(payload)
         career_stats = payload.get("careerStats")
         if isinstance(career_stats, dict):
             self._render_career_stats(career_stats)
         else:
             self._render_career_stats({})
+        self._apply_card_state()
 
     def _render_pairs_grid(
         self,
@@ -1570,6 +2114,7 @@ class PlayerCardDialog(QDialog):
         *,
         empty_text: str,
         columns: int = 2,
+        variant: str = "info",
     ) -> None:
         self._clear_grid(layout)
         rows: List[tuple[str, str]] = []
@@ -1596,18 +2141,45 @@ class PlayerCardDialog(QDialog):
             row = idx // columns
             col = idx % columns
             chip = QFrame()
-            chip.setObjectName("dataChip")
-            chip_layout = QVBoxLayout(chip)
-            chip_layout.setContentsMargins(6, 4, 6, 4)
-            chip_layout.setSpacing(1)
-            key_label = QLabel(label)
-            key_label.setObjectName("fieldKey")
-            value_label = QLabel(val)
-            value_label.setObjectName("fieldVal")
-            value_label.setWordWrap(True)
-            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            chip_layout.addWidget(key_label)
-            chip_layout.addWidget(value_label)
+            if variant == "stat":
+                chip.setObjectName("statChip")
+                chip_layout = QHBoxLayout(chip)
+                chip_layout.setContentsMargins(10, 7, 10, 7)
+                chip_layout.setSpacing(6)
+                value_label = QLabel(val)
+                value_label.setObjectName("chipValue")
+                key_label = QLabel(label)
+                key_label.setObjectName("chipKey")
+                value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                key_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                chip_layout.addWidget(value_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+                chip_layout.addWidget(key_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
+            elif variant == "career":
+                chip.setObjectName("careerChip")
+                chip_layout = QHBoxLayout(chip)
+                chip_layout.setContentsMargins(8, 5, 8, 5)
+                chip_layout.setSpacing(4)
+                value_label = QLabel(val)
+                value_label.setObjectName("careerChipValue")
+                key_label = QLabel(label)
+                key_label.setObjectName("chipKey")
+                value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                key_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                chip_layout.addWidget(value_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
+                chip_layout.addWidget(key_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
+            else:
+                chip.setObjectName("infoChip")
+                chip_layout = QVBoxLayout(chip)
+                chip_layout.setContentsMargins(2, 1, 2, 1)
+                chip_layout.setSpacing(1)
+                key_label = QLabel(label)
+                key_label.setObjectName("infoKey")
+                value_label = QLabel(val)
+                value_label.setObjectName("infoValue")
+                value_label.setWordWrap(True)
+                value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                chip_layout.addWidget(key_label)
+                chip_layout.addWidget(value_label)
             layout.addWidget(chip, row, col)
 
     def set_headshot(self, pixmap: QPixmap | None) -> None:
