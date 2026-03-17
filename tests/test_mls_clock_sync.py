@@ -1,4 +1,6 @@
 import time
+
+from scoresource.realtime import REALTIME_POLL_INTERVAL, RealTimeGameState, RealTimePollingClient
 from scoresource.ui import ScoreSourceWindow
 
 
@@ -187,3 +189,100 @@ def test_nhl_penalty_clock_ticks_when_display_clock_is_synthetic_live():
         time.monotonic = original_monotonic  # type: ignore[assignment]
 
     assert window.away_penalty_clock.text() == "PEN 1:00"
+
+
+def test_nba_realtime_clock_stops_after_synthetic_window_expires():
+    window = ScoreSourceWindow.__new__(ScoreSourceWindow)
+    window.sport_name = "NBA"
+    window.center_panel = _DummyCenterPanel()
+    window._clock_state = {
+        "period": "1ST",
+        "clock_secs": 246.0,
+        "shot_secs": None,
+        "raw_secs": 252.0,
+        "running": True,
+        "raw_running": False,
+        "last_ts": 100.0,
+        "last_feed_ts": 100.0,
+        "feed_interval_avg": 0.5,
+        "source": "realtime",
+        "count_up": False,
+        "synthetic_window_sec": 2.0,
+    }
+    window._penalty_state = None
+
+    original_monotonic = time.monotonic
+    try:
+        time.monotonic = lambda: 106.0  # type: ignore[assignment]
+        ScoreSourceWindow._tick_clock(window)
+    finally:
+        time.monotonic = original_monotonic  # type: ignore[assignment]
+
+    assert window._clock_state["running"] is False
+    assert window._clock_state["clock_secs"] == 246.0
+
+
+def test_nba_clock_snaps_back_to_official_stop_after_local_drift():
+    window = ScoreSourceWindow.__new__(ScoreSourceWindow)
+    window.sport_name = "NBA"
+    window.clock_buffer_sec = 0.0
+    window.clock_feed_stale_sec = 2.0
+    window.clock_feed_interval_avg = None
+    window._clock_state = {
+        "period": "1ST",
+        "clock_secs": 246.0,
+        "shot_secs": None,
+        "raw_secs": 252.0,
+        "running": False,
+        "raw_running": False,
+        "last_ts": 100.0,
+        "last_feed_ts": 100.0,
+        "feed_interval_avg": 0.5,
+        "source": "realtime",
+        "count_up": False,
+        "synthetic_window_sec": 2.0,
+    }
+
+    original_monotonic = time.monotonic
+    try:
+        time.monotonic = lambda: 106.0  # type: ignore[assignment]
+        _, _, state = ScoreSourceWindow._compute_clock_state(
+            window,
+            "1ST",
+            252.0,
+            None,
+            "4:12",
+            force_live=True,
+            buffer_sec=0.0,
+            stale_window_sec=2.0,
+            source="realtime",
+        )
+    finally:
+        time.monotonic = original_monotonic  # type: ignore[assignment]
+
+    assert state["running"] is False
+    assert state["raw_running"] is False
+    assert state["clock_secs"] == 252.0
+
+
+def test_nba_realtime_client_emits_heartbeat_for_unchanged_state():
+    client = RealTimePollingClient("0022500973", lambda state: None)
+    stable_state = RealTimeGameState(
+        game_id="0022500973",
+        period=1,
+        game_clock_raw="PT04M12.00S",
+        game_clock_text="4:12",
+        shot_clock=None,
+        home_score=10,
+        away_score=8,
+        possession_team_id=None,
+    )
+    client._last_state = stable_state
+    client._last_emit_ts = 100.0
+
+    original_monotonic = time.monotonic
+    try:
+        time.monotonic = lambda: 100.0 + REALTIME_POLL_INTERVAL + 0.01  # type: ignore[assignment]
+        assert client._should_emit_state(stable_state) is True
+    finally:
+        time.monotonic = original_monotonic  # type: ignore[assignment]

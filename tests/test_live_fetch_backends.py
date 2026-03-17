@@ -272,3 +272,147 @@ def test_nhl_penalty_clocks_from_plays_accepts_infraction_types_on_countdown_clo
     clocks = nhl._penalty_clocks_from_plays(plays, current_period=3, current_clock_secs=16 * 60 + 30)
 
     assert clocks == {"14": [30]}
+
+
+def test_nhl_penalty_clocks_ignore_coincidental_penalties():
+    plays = [
+        {
+            "sequenceNumber": "259",
+            "type": {
+                "text": "Roughing",
+                "penaltyMinutes": "2",
+                "penaltyType": "Minor",
+            },
+            "text": "Evgeni Malkin Roughing against Parker Kelly",
+            "team": {"id": "16"},
+            "period": {"number": 3, "displayValue": "3rd"},
+            "clock": {"displayValue": "10:59"},
+            "strength": {"text": "Even Strength"},
+        },
+        {
+            "sequenceNumber": "260",
+            "type": {
+                "text": "Roughing",
+                "penaltyMinutes": "2",
+                "penaltyType": "Minor",
+            },
+            "text": "Parker Kelly Roughing against Evgeni Malkin",
+            "team": {"id": "17"},
+            "period": {"number": 3, "displayValue": "3rd"},
+            "clock": {"displayValue": "10:59"},
+            "strength": {"text": "Power Play"},
+        },
+        {
+            "sequenceNumber": "261",
+            "type": {
+                "text": "Fighting",
+                "penaltyMinutes": "5",
+                "penaltyType": "Major",
+            },
+            "text": "Connor Clifton Fighting against Jack Drury",
+            "team": {"id": "16"},
+            "period": {"number": 3, "displayValue": "3rd"},
+            "clock": {"displayValue": "10:59"},
+            "strength": {"text": "Even Strength"},
+        },
+        {
+            "sequenceNumber": "262",
+            "type": {
+                "text": "Fighting",
+                "penaltyMinutes": "5",
+                "penaltyType": "Major",
+            },
+            "text": "Jack Drury Fighting against Connor Clifton",
+            "team": {"id": "17"},
+            "period": {"number": 3, "displayValue": "3rd"},
+            "clock": {"displayValue": "10:59"},
+            "strength": {"text": "Power Play"},
+        },
+    ]
+
+    clocks = nhl._penalty_clocks_from_plays(plays, current_period=3, current_clock_secs=9 * 60 + 1)
+
+    assert clocks == {}
+
+
+def test_nhl_extract_team_shots_ignores_shootout_goals_slot():
+    stats_list = [
+        {"name": "shootoutGoals", "abbreviation": "SOG", "displayValue": "0", "label": "Shootout Goals"},
+        {"name": "shotsTotal", "abbreviation": "S", "displayValue": "21", "label": "Shots"},
+    ]
+
+    assert nhl._extract_team_shots(stats_list) == 21
+
+
+def test_nhl_fetch_boxscore_players_prefers_s_for_skater_shots(monkeypatch):
+    payload = {
+        "header": {
+            "competitions": [
+                {
+                    "competitors": [
+                        {"homeAway": "home", "score": "2", "team": {"id": "17", "abbreviation": "COL"}},
+                        {"homeAway": "away", "score": "6", "team": {"id": "16", "abbreviation": "PIT"}},
+                    ],
+                    "status": {
+                        "displayClock": "1:14",
+                        "period": 2,
+                        "type": {"shortDetail": "1:14 - 2nd", "detail": "1:14 - 2nd"},
+                    },
+                }
+            ]
+        },
+        "plays": [],
+        "onIce": [],
+        "boxscore": {
+            "players": [
+                {
+                    "team": {"id": "16", "abbreviation": "PIT"},
+                    "statistics": [
+                        {
+                            "name": "forwards",
+                            "labels": ["G", "A", "S", "SOG", "PIM", "+/-", "TOI", "HT", "BS"],
+                            "athletes": [
+                                {
+                                    "athlete": {
+                                        "id": "3124",
+                                        "firstName": "Evgeni",
+                                        "lastName": "Malkin",
+                                        "displayName": "Evgeni Malkin",
+                                        "jersey": "71",
+                                        "position": {"abbreviation": "C"},
+                                    },
+                                    "stats": ["2", "1", "3", "0", "2", "+2", "18:44", "2", "1"],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "teams": [
+                {
+                    "team": {"id": "16", "abbreviation": "PIT"},
+                    "statistics": [
+                        {"name": "shotsTotal", "abbreviation": "S", "displayValue": "15", "label": "Shots"},
+                        {"name": "shootoutGoals", "abbreviation": "SOG", "displayValue": "0", "label": "Shootout Goals"},
+                    ],
+                }
+            ],
+        },
+    }
+
+    monkeypatch.setattr(nhl, "_fetch_summary_payload", lambda *_args, **_kwargs: payload)
+
+    players_by_team, team_stats_by_team, *_rest = nhl._fetch_boxscore_players(
+        "401803418",
+        current_period=2,
+        current_clock="1:14",
+        status_hint="live",
+    )
+
+    assert players_by_team["16"][0]["statistics"]["shotsOnGoal"] == 3
+    assert players_by_team["16"][0]["statistics"]["points"] == 3
+    assert players_by_team["16"][0]["statistics"]["plusMinus"] == "+2"
+    assert players_by_team["16"][0]["statistics"]["toi"] == "18:44"
+    assert players_by_team["16"][0]["statistics"]["hits"] == 2
+    assert players_by_team["16"][0]["statistics"]["blockedShots"] == 1
+    assert team_stats_by_team["16"]["shotsOnGoal"] == 15

@@ -12,6 +12,7 @@ TEAM_MAP_TTL = 60 * 60 * 12
 ESPN_SPORT_PATH: Dict[str, str] = {
     "NBA": "basketball/nba",
     "WNBA": "basketball/wnba",
+    "NCAA BASKETBALL": "basketball/mens-college-basketball",
     "NFL": "football/nfl",
     "NHL": "hockey/nhl",
     "MLB": "baseball/mlb",
@@ -21,6 +22,7 @@ ESPN_SPORT_PATH: Dict[str, str] = {
 
 DEPTHCHART_ORDER: Dict[str, List[str]] = {
     "NBA": ["pg", "sg", "sf", "pf", "c"],
+    "NCAA BASKETBALL": ["pg", "sg", "sf", "pf", "c"],
     "MLB": ["p", "c", "1b", "2b", "3b", "ss", "lf", "cf", "rf"],
     "NFL": ["qb", "rb", "wr1", "wr2", "wr3", "te", "lt", "lg", "c", "rg", "rt"],
 }
@@ -319,7 +321,7 @@ def _roster_lineup_for_sport(
         return _roster_lineup_football(offense_items)
     if sport == "NHL":
         return _roster_lineup_nhl(items)
-    if sport == "NBA":
+    if sport in ("NBA", "NCAA BASKETBALL"):
         return _roster_lineup_nba(items)
     if sport == "MLB":
         return _roster_lineup_mlb(items)

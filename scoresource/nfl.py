@@ -207,14 +207,39 @@ def _status(state: str | None) -> str:
     return "live"
 
 
+def _status_value(status: str | None) -> int:
+    normalized = str(status or "").strip().lower()
+    if normalized == "final":
+        return 3
+    if normalized == "upcoming":
+        return 1
+    return 2
+
+
 def _header(state: str, period: int | None, clock: str | None, start: Any) -> str:
     if state == "post":
         return "Final"
     if state == "pre":
         return format_start_time(start)
+    # Always prefer explicit clock/period from feed
+    if clock and period:
+        return f"Q{period} {clock}".strip()
+    if clock:
+        return clock
     if period:
-        return f"Q{period} {clock or ''}".strip()
-    return clock or "Live"
+        return f"Q{period}"
+    # Only estimate if missing and game is live
+    if state in ("in", "live", "playing"):
+        est = _estimate_period_and_clock(start)
+        if est:
+            est_clock, est_period = est
+            if est_clock and est_period:
+                return f"Q{est_period} {est_clock}".strip()
+            if est_clock:
+                return est_clock
+            if est_period:
+                return f"Q{est_period}"
+    return "Live"
 
 
 def _parse_clock_and_period(text: str | None) -> tuple[str | None, int | None]:
@@ -231,10 +256,74 @@ def _parse_clock_and_period(text: str | None) -> tuple[str | None, int | None]:
     clock = None
     period = None
     m = re.search(r"(\d{1,2}:\d{2})", raw)
+    import logging
+    if not text:
+        logging.debug("_parse_clock_and_period: text is None")
+        return None, None
+    raw = str(text).strip()
+    if not raw:
+        logging.debug("_parse_clock_and_period: raw is empty")
+        return None, None
+    upper = raw.upper()
+    logging.debug(f"_parse_clock_and_period: raw='{raw}', upper='{upper}'")
+    has_live_tag = any(tag in upper for tag in ("Q1", "Q2", "Q3", "Q4", "1ST", "2ND", "3RD", "4TH", "OT", "HALF", "END", "FINAL", "SEAHWKS", "SEAHAWKS"))
+    if not has_live_tag:
+        if "AM" in upper or "PM" in upper or re.search(r"\b\d{1,2}/\d{1,2}\b", upper):
+            logging.debug("_parse_clock_and_period: not a live tag, returning None")
+            return None, None
+    clock = None
+    period = None
+    # Try to match clock (e.g., 12:34)
+    m = re.search(r"(\d{1,2}:\d{2})", raw)
     if m:
         clock = m.group(1)
+    # Try to match period (Q1, Q2, etc. or 1st, 2nd, etc. and edge cases)
     if "OT" in upper:
         period = 5
+    elif "HALF" in upper or "HALFTIME" in upper:
+        period = 2
+        clock = "Halftime"
+    elif "2-MINUTE WARNING" in upper:
+        # Use current period if possible, or fallback to 2 or 4
+        if "2ND" in upper or "Q2" in upper:
+            period = 2
+        elif "4TH" in upper or "Q4" in upper:
+            period = 4
+        else:
+            period = None
+        clock = "2:00"
+    elif "END" in upper:
+        if "1ST" in upper or "Q1" in upper:
+            period = 1
+            clock = "End 1st"
+        elif "2ND" in upper or "Q2" in upper:
+            period = 2
+            clock = "End 2nd"
+        elif "3RD" in upper or "Q3" in upper:
+            period = 3
+            clock = "End 3rd"
+        elif "4TH" in upper or "Q4" in upper:
+            period = 4
+            clock = "End 4th"
+        else:
+            period = None
+            clock = "End"
+    elif "START" in upper:
+        if "1ST" in upper or "Q1" in upper:
+            period = 1
+            clock = "Start 1st"
+        elif "2ND" in upper or "Q2" in upper:
+            period = 2
+            clock = "Start 2nd"
+        elif "3RD" in upper or "Q3" in upper:
+            period = 3
+            clock = "Start 3rd"
+        elif "4TH" in upper or "Q4" in upper:
+            period = 4
+            clock = "Start 4th"
+        else:
+            period = None
+            clock = "Start"
     else:
         m = re.search(r"\b(\d)(?:ST|ND|RD|TH)\b", upper)
         if m:
@@ -243,20 +332,11 @@ def _parse_clock_and_period(text: str | None) -> tuple[str | None, int | None]:
             m = re.search(r"\bQ(\d)\b", upper)
             if m:
                 period = int(m.group(1))
+    # Seahawks special: try to match 'SEAHAWKS' or 'SEAHWKS' and log
+    if "SEAHAWKS" in upper or "SEAHWKS" in upper:
+        logging.debug(f"_parse_clock_and_period: Seahawks detected in '{upper}'")
+    logging.debug(f"_parse_clock_and_period: returning clock={clock}, period={period}")
     return clock, period
-
-
-def _start_time_epoch(start: Any) -> float | None:
-    if start in (None, ""):
-        return None
-    if isinstance(start, (int, float)):
-        return float(start)
-    if isinstance(start, str):
-        try:
-            dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-            return dt.timestamp()
-        except Exception:
-            return None
     return None
 
 
@@ -291,6 +371,23 @@ def _estimate_period_and_clock(start: Any) -> tuple[str, int] | None:
     if elapsed >= max_game:
         return "0:00", 4
     period = int(elapsed // quarter_len) + 1
+    # Prevent clock from jumping when game is paused (e.g., not live)
+    # Only decrement if the game is in a live state
+    import inspect
+    frame = inspect.currentframe()
+    state = None
+    while frame:
+        if 'state' in frame.f_locals:
+            state = frame.f_locals['state']
+            break
+        frame = frame.f_back
+    if state not in ("in", "live", "playing"):
+        # If not live, freeze at last known clock (do not decrement)
+        remaining = quarter_len - (elapsed % quarter_len)
+        if remaining < 1:
+            remaining = 0
+        return _format_clock_seconds(remaining), period
+    # If live, decrement as normal
     remaining = quarter_len - (elapsed % quarter_len)
     return _format_clock_seconds(remaining), period
 
@@ -1029,6 +1126,7 @@ def get_scoreboard() -> Dict[str, Any]:
             "homeTeam": home_team,
             "awayTeam": away_team,
             "status": _status(state),
+            "gameStatus": _status_value(_status(state)),
             "startTime": start_time,
             "header": header,
             "gameStatusText": header,
@@ -1144,6 +1242,7 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
             "gameClock": clock,
             "shotClock": None,
             "period": {"current": period} if period else {},
+            "gameStatus": _status_value(_status(state)),
             "gameStatusText": header,
             "shortDownDistanceText": short_down or "",
             "downDistanceText": down_text or "",
@@ -1159,6 +1258,7 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
             "homeTeam": home_team,
             "awayTeam": away_team,
             "status": game.get("status") or _status(state),
+            "gameStatus": game.get("gameStatus") or _status_value(game.get("status") or _status(state)),
             "startTime": start_time,
             "header": header,
             "gameStatusText": header,
@@ -1173,7 +1273,13 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
         if not game_entry:
             return _demo_boxscore(game_id)
         header = game_entry.get("header") or _header(game_entry.get("status"), None, None, game_entry.get("startTime"))
-        game = {"gameClock": None, "shotClock": None, "period": {"current": None}, "gameStatusText": header}
+        game = {
+            "gameClock": None,
+            "shotClock": None,
+            "period": {"current": None},
+            "gameStatus": game_entry.get("gameStatus") or _status_value(game_entry.get("status")),
+            "gameStatusText": header,
+        }
         home_team = game_entry.get("homeTeam", {})
         away_team = game_entry.get("awayTeam", {})
     else:
@@ -1202,7 +1308,45 @@ def get_team_colors(tricode: str) -> Dict[str, str]:
     }
 
 
-def get_team_logo(team_id: str | None, tricode: str | None) -> bytes | None:
+def get_team_logo(team_id: str | None, tricode: str | None, is_super_bowl: bool = False) -> bytes | None:
+    """Load team logo, or Super Bowl logo for championship games."""
+    # If this is a Super Bowl game, use the Super Bowl logo
+    if is_super_bowl:
+        key = ("superbowl", "superbowl")
+        if key in _logo_cache:
+            return _logo_cache[key]
+        
+        cache_path = LOGO_DIR / "nfl_superbowl.png"
+        if cache_path.exists():
+            try:
+                data = cache_path.read_bytes()
+                _logo_cache[key] = data
+                return data
+            except Exception:
+                pass
+        
+        # Try multiple Super Bowl logo sources
+        sb_logo_urls = [
+            "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png",
+            "https://a.espncdn.com/combiner/i?img=/i/teamlogos/leagues/500/nfl.png",
+            "https://upload.wikimedia.org/wikipedia/commons/thumb/5/50/Vince_Lombardi_Trophy.svg/500px-Vince_Lombardi_Trophy.svg.png",
+        ]
+        
+        for url in sb_logo_urls:
+            try:
+                resp = _session.get(url, headers=HEADERS, timeout=LOGO_TIMEOUT_SEC)
+                resp.raise_for_status()
+                data = resp.content
+                cache_path.write_bytes(data)
+                _logo_cache[key] = data
+                return data
+            except Exception:
+                continue
+        
+        _logo_cache[key] = None
+        return None
+    
+    # Regular team logo logic
     tri = (tricode or "").upper()
     key = (team_id or "", tri)
     if key in _logo_cache:
@@ -1234,8 +1378,8 @@ def get_team_logo(team_id: str | None, tricode: str | None) -> bytes | None:
 
 
 # legacy compat
-def load_logo(team_id: str | None, tricode: str | None = "") -> bytes | None:
-    return get_team_logo(team_id, tricode)
+def load_logo(team_id: str | None, tricode: str | None = "", is_super_bowl: bool = False) -> bytes | None:
+    return get_team_logo(team_id, tricode, is_super_bowl=is_super_bowl)
 
 
 def safe_score(team: Dict[str, Any]) -> int:

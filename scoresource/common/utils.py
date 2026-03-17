@@ -28,14 +28,14 @@ def http_get_json(url: str, timeout: float = 5.0) -> Dict[str, Any] | None:
         return None
 
 
-def iso_to_local(iso_str: str | None) -> str:
-    """Convert ISO-8601 string to local time string."""
+def iso_to_local(iso_str: Any) -> str:
+    """Convert a timestamp-like value to configured local display time."""
     if not iso_str:
         return "--:--"
     try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        local = dt.astimezone()
-        return local.strftime("%-I:%M %p")
+        from .timefmt import format_start_time
+        label = format_start_time(iso_str)
+        return label if label and label != "Starts TBA" else "--:--"
     except Exception:
         return "--:--"
 

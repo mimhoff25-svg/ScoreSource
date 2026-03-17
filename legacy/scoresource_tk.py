@@ -78,13 +78,6 @@ boxscore_job = None
 STATE_PATH = Path.home() / ".local" / "share" / "scoresource" / "state.json"
 LOG_PATH = STATE_PATH.parent / "scoreboard.log"
 LOGO_DIR = Path.home() / ".cache" / "scoresource" / "logos"
-DEMO_MODE = os.environ.get("SCORESOURCE_DEMO") == "1"
-DEMO_REASON = ""
-if not NBA_API_AVAILABLE:
-    DEMO_MODE = True
-    DEMO_REASON = f"nba_api missing ({NBA_API_ERROR})"
-elif DEMO_MODE:
-    DEMO_REASON = "SCORESOURCE_DEMO=1"
 
 # Logging setup
 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -720,8 +713,12 @@ def demo_boxscore():
 
 
 def fetch_scores():
-    if DEMO_MODE or not NBA_API_AVAILABLE or scoreboard is None:
-        return demo_scoreboard()
+    if not NBA_API_AVAILABLE or scoreboard is None:
+        disk = _load_disk_scoreboard()
+        if disk:
+            return disk
+        return {"games": [], "lines": ["No NBA games available"]}
+    
     now = time.monotonic()
     if scoreboard_cache["data"] and now - scoreboard_cache["ts"] < SCOREBOARD_TTL:
         return scoreboard_cache["data"]
@@ -731,15 +728,17 @@ def fetch_scores():
         games = data.get("scoreboard", {}).get("games", [])
         lines = [format_game(game) for game in games]
         result = {"games": games, "lines": lines}
-        if not games:
-            # No games returned; fallback to demo so UI is never empty.
-            demo = demo_scoreboard()
-            result = demo
         scoreboard_cache["data"] = result
         scoreboard_cache["ts"] = now
         return result
     except Exception:
-        # On error, use cached; if none, use demo to keep UI working.
+        # On error, use cached; if none, return empty
+        if scoreboard_cache.get("data"):
+            return scoreboard_cache["data"]
+        disk = _load_disk_scoreboard()
+        if disk:
+            return disk
+        return {"games": [], "lines": ["No NBA games available"]}
         if scoreboard_cache["data"]:
             return scoreboard_cache["data"]
         return demo_scoreboard()
@@ -856,10 +855,9 @@ def schedule_update():
 
 # --- BOX SCORE ---
 def fetch_boxscore(game_id):
-    if DEMO_MODE or not NBA_API_AVAILABLE or boxscore is None:
-        return demo_boxscore()
-    if game_id == "DEMO123":
-        return demo_boxscore()
+    if not NBA_API_AVAILABLE or boxscore is None:
+        return {"game": {}, "home": {}, "away": {}, "header": "No games", "shotclock": "--"}
+    
     now = time.monotonic()
     cached = boxscore_cache.get(game_id)
     if cached and now - cached[0] < BOXSCORE_TTL:
@@ -868,8 +866,9 @@ def fetch_boxscore(game_id):
     try:
         data = boxscore.BoxScore(game_id=game_id).get_dict()
     except Exception:
-        # Fallback to demo if the API fails
-        return demo_boxscore()
+        # Return empty boxscore if the API fails
+        return {"game": {}, "home": {}, "away": {}, "header": "No games", "shotclock": "--"}
+    
     game = data["game"]
     home = game["homeTeam"]
     away = game["awayTeam"]

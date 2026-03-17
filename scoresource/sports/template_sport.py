@@ -107,17 +107,17 @@ def safe_score(team: Dict[str, Any]) -> int:
 
 
 def extract_start_time_text(game: Dict[str, Any], key: str = "gameTimeUTC") -> str:
+    from ..common.timefmt import format_start_time, normalize_espn_time_str
     status_text = (game.get("gameStatusText") or game.get("statusText") or "").strip()
-    if status_text and any(am_pm in status_text.upper() for am_pm in ("AM", "PM")):
-        return status_text
+    if status_text and any(x in status_text.upper() for x in ("AM", "PM")):
+        normalized = normalize_espn_time_str(status_text)
+        if normalized:
+            return normalized
     iso_val = game.get(key) or game.get("startTime") or game.get("date")
     if isinstance(iso_val, str) and iso_val:
-        try:
-            dt = datetime.fromisoformat(iso_val.replace("Z", "+00:00"))
-            dt_local = dt.astimezone()
-            return dt_local.strftime("%I:%M %p %Z").lstrip("0")
-        except Exception:
-            pass
+        result = format_start_time(iso_val)
+        if result != "Starts TBA":
+            return result
     return status_text or "Scheduled"
 
 # --- disk IO --------------------------------------------------------------

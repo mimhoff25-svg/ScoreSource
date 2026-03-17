@@ -4,10 +4,11 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
-from PySide6.QtWidgets import QLabel
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtGui import QKeyEvent
+from PySide6.QtWidgets import QApplication, QLabel, QGraphicsDropShadowEffect, QTableWidget, QTableWidgetItem, QWidget
 
-from scoresource.ui.window import PlayerCardDialog, ScoreSourceWindow
+from scoresource.ui.window import PLAYER_CONTEXT_ROLE, PlayerCardDialog, ScoreSourceWindow
 
 
 @pytest.fixture(scope="module")
@@ -61,6 +62,16 @@ class _FakeCenterPanel:
         }
 
 
+class _CardNavParent(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.steps: list[int] = []
+
+    def _step_active_player_card(self, delta: int) -> bool:
+        self.steps.append(delta)
+        return True
+
+
 def test_player_card_promotes_hero_stat_and_hot_state(qapp):
     dialog = PlayerCardDialog(
         {
@@ -92,11 +103,195 @@ def test_player_card_promotes_hero_stat_and_hot_state(qapp):
     assert dialog.hero_stat_value.text() == "24"
     assert dialog.hero_stat_label.text() == "PTS"
     assert "SF" in dialog.meta_label.text()
-    assert "31 MIN" in dialog.meta_label.text()
     assert "ATL" in dialog.meta_label.text()
+    assert "MIN" not in dialog.meta_label.text()
     assert dialog.status_badge.isVisible() is False
     assert dialog.surface.property("cardState") == "hot"
+    assert dialog.hero_stat_value.graphicsEffect() is None
+    assert isinstance(dialog.hero_stat_wrap.graphicsEffect(), QGraphicsDropShadowEffect)
     assert dialog.bio_grid.count() > 0
+
+    dialog.close()
+
+
+def test_player_card_arrow_keys_delegate_to_parent_navigation(qapp):
+    parent = _CardNavParent()
+    dialog = PlayerCardDialog(
+        {
+            "sport": "NBA",
+            "playerName": "Jalen Johnson",
+            "jersey": "1",
+            "position": "SF",
+            "teamTricode": "ATL",
+            "rowStats": {"PTS": "24"},
+        },
+        parent=parent,
+    )
+    dialog.show()
+    dialog.setFocus()
+    qapp.processEvents()
+
+    QApplication.sendEvent(dialog, QKeyEvent(QEvent.KeyPress, Qt.Key_Right, Qt.NoModifier))
+    QApplication.sendEvent(dialog, QKeyEvent(QEvent.KeyPress, Qt.Key_Left, Qt.NoModifier))
+
+    assert parent.steps == [1, -1]
+
+    dialog.close()
+    parent.close()
+
+
+def test_step_active_player_card_wraps_across_player_tables(qapp):
+    away_table = QTableWidget(2, 2)
+    home_table = QTableWidget(1, 2)
+    away_table.setHorizontalHeaderLabels(["#", "Player"])
+    home_table.setHorizontalHeaderLabels(["#", "Player"])
+
+    away_player = QTableWidgetItem("Player A")
+    away_player.setData(
+        PLAYER_CONTEXT_ROLE,
+        {
+            "sport": "NBA",
+            "playerName": "Player A",
+            "teamTricode": "SAS",
+            "rowStats": {"PTS": "10"},
+        },
+    )
+    away_table.setItem(0, 1, away_player)
+    away_table.setItem(1, 1, QTableWidgetItem("No stats available"))
+
+    home_player = QTableWidgetItem("Player B")
+    home_player.setData(
+        PLAYER_CONTEXT_ROLE,
+        {
+            "sport": "NBA",
+            "playerName": "Player B",
+            "teamTricode": "LAC",
+            "rowStats": {"PTS": "12"},
+        },
+    )
+    home_table.setItem(0, 1, home_player)
+
+    calls = []
+    stub = SimpleNamespace(
+        away_table=away_table,
+        home_table=home_table,
+        _active_player_card=object(),
+        _active_player_card_table=away_table,
+        _active_player_card_row=0,
+        _active_player_card_context={"playerName": "Player A"},
+    )
+    stub._is_player_card_row_navigable = lambda table, row: ScoreSourceWindow._is_player_card_row_navigable(
+        stub, table, row
+    )
+    stub._player_card_row_sequence = lambda: ScoreSourceWindow._player_card_row_sequence(stub)
+    stub._on_player_cell_clicked = lambda table, row, col: calls.append((table, row, col))
+
+    assert ScoreSourceWindow._step_active_player_card(stub, 1) is True
+    qapp.processEvents()
+
+    assert calls == [(home_table, 0, 1)]
+
+
+def test_player_card_click_refreshes_row_stats_from_current_table(qapp):
+    table = QTableWidget(1, 8)
+    table.setHorizontalHeaderLabels(["#", "Player", "Pos", "Min", "Pts", "Reb", "Ast", "3PT"])
+
+    values = ["3", "K. Johnson", "F", "21:57", "8", "5", "0", "0"]
+    for col, value in enumerate(values):
+        table.setItem(0, col, QTableWidgetItem(value))
+
+    name_item = table.item(0, 1)
+    name_item.setData(
+        PLAYER_CONTEXT_ROLE,
+        {
+            "sport": "NBA",
+            "playerName": "Keldon Johnson",
+            "teamTricode": "SAS",
+            "position": "",
+            "rowStats": {"#": "3", "Player": "K. Johnson", "Pts": ""},
+        },
+    )
+
+    opened = []
+    stub = SimpleNamespace(
+        _is_player_card_row_navigable=lambda current_table, row: ScoreSourceWindow._is_player_card_row_navigable(
+            stub, current_table, row
+        ),
+        _table_row_stats=lambda current_table, row: ScoreSourceWindow._table_row_stats(stub, current_table, row),
+        _fallback_player_context=lambda current_table, row, player_name: {},
+        _open_player_card=lambda context, table=None, row=None: opened.append((context, table, row)),
+    )
+    stub._current_player_context_for_row = lambda current_table, row: ScoreSourceWindow._current_player_context_for_row(
+        stub, current_table, row
+    )
+
+    ScoreSourceWindow._on_player_cell_clicked(stub, table, 0, 1)
+
+    assert len(opened) == 1
+    context, opened_table, opened_row = opened[0]
+    assert opened_table is table
+    assert opened_row == 0
+    assert context["rowStats"]["Pts"] == "8"
+    assert context["position"] == "F"
+
+
+def test_active_player_card_refreshes_from_latest_table_row(qapp):
+    table = QTableWidget(1, 8)
+    table.setHorizontalHeaderLabels(["#", "Player", "Pos", "Min", "Pts", "Reb", "Ast", "3PT"])
+    values = ["3", "K. Johnson", "F", "21:57", "8", "5", "0", "0"]
+    for col, value in enumerate(values):
+        table.setItem(0, col, QTableWidgetItem(value))
+
+    name_item = table.item(0, 1)
+    name_item.setData(
+        PLAYER_CONTEXT_ROLE,
+        {
+            "sport": "NBA",
+            "playerId": "1629640",
+            "playerName": "Keldon Johnson",
+            "teamTricode": "SAS",
+            "position": "",
+            "rowStats": {"#": "3", "Player": "K. Johnson", "Pts": ""},
+        },
+    )
+
+    dialog = PlayerCardDialog(
+        {
+            "sport": "NBA",
+            "playerId": "1629640",
+            "playerName": "Keldon Johnson",
+            "teamTricode": "SAS",
+            "position": "",
+            "rowStats": {"#": "3", "Player": "K. Johnson", "Pts": ""},
+        }
+    )
+    dialog.apply_profile({"displayName": "Keldon Johnson", "position": "F"})
+    dialog.show()
+    qapp.processEvents()
+
+    stub = SimpleNamespace(
+        away_table=table,
+        home_table=None,
+        _active_player_card=dialog,
+        _active_player_card_table=table,
+        _active_player_card_row=0,
+        _active_player_card_context={"playerId": "1629640", "playerName": "Keldon Johnson", "teamTricode": "SAS"},
+    )
+    stub._is_player_card_row_navigable = lambda current_table, row: ScoreSourceWindow._is_player_card_row_navigable(
+        stub, current_table, row
+    )
+    stub._table_row_stats = lambda current_table, row: ScoreSourceWindow._table_row_stats(stub, current_table, row)
+    stub._fallback_player_context = lambda current_table, row, player_name: {}
+    stub._current_player_context_for_row = lambda current_table, row: ScoreSourceWindow._current_player_context_for_row(
+        stub, current_table, row
+    )
+    stub._find_player_row_for_context = lambda context: ScoreSourceWindow._find_player_row_for_context(stub, context)
+
+    ScoreSourceWindow._refresh_active_player_card_from_tables(stub)
+
+    assert dialog.hero_stat_label.text() == "PTS"
+    assert dialog.hero_stat_value.text() == "8"
+    assert "F" in dialog.meta_label.text()
 
     dialog.close()
 
@@ -142,9 +337,134 @@ def test_player_card_nba_supplements_missing_points_and_position_from_player_dat
     assert dialog.hero_stat_label.text() == "PTS"
     assert dialog.hero_stat_value.text() == "5"
     assert "SF" in dialog.meta_label.text()
+    assert "MIN" in stat_labels
     assert "3PT" in stat_labels
 
     dialog.close()
+
+
+def test_player_card_nba_normalizes_title_case_row_stats_for_points(qapp):
+    dialog = PlayerCardDialog(
+        {
+            "sport": "NBA",
+            "playerName": "Carter Bryant",
+            "jersey": "11",
+            "position": "F",
+            "teamTricode": "SAS",
+            "teamColor": "#c4ced4",
+            "rowStats": {
+                "#": "11",
+                "Player": "C. Bryant",
+                "Pos": "F",
+                "Min": "17:57",
+                "Pts": "10",
+                "Reb": "4",
+                "Ast": "1",
+                "Stl": "0",
+                "Blk": "0",
+                "TO": "0",
+            },
+        }
+    )
+
+    qapp.processEvents()
+
+    assert dialog.hero_stat_label.text() == "PTS"
+    assert dialog.hero_stat_value.text() == "10"
+    assert "F" in dialog.meta_label.text()
+    assert "SAS" in dialog.meta_label.text()
+
+    dialog.close()
+
+
+def test_player_card_nba_support_stats_use_single_row_strip(qapp):
+    dialog = PlayerCardDialog(
+        {
+            "sport": "NBA",
+            "playerName": "Keldon Johnson",
+            "jersey": "3",
+            "position": "F",
+            "teamTricode": "SAS",
+            "teamColor": "#c4ced4",
+            "rowStats": {
+                "#": "3",
+                "Player": "K. Johnson",
+                "Pos": "F",
+                "Min": "21:57",
+                "Pts": "8",
+                "Reb": "5",
+                "Ast": "0",
+                "3PT": "0",
+            },
+        }
+    )
+
+    qapp.processEvents()
+
+    stat_labels = _grid_labels(dialog.stat_grid, "chipKey")
+
+    assert stat_labels == ["MIN", "REB", "AST", "3PT"]
+    assert dialog.stat_grid.count() == 4
+    min_chip = dialog.stat_grid.itemAtPosition(0, 0).widget()
+    reb_chip = dialog.stat_grid.itemAtPosition(1, 0).widget()
+    ast_chip = dialog.stat_grid.itemAtPosition(1, 1).widget()
+    three_chip = dialog.stat_grid.itemAtPosition(1, 2).widget()
+    assert min_chip is not None
+    assert reb_chip is not None
+    assert ast_chip is not None
+    assert three_chip is not None
+    min_value = next(label for label in min_chip.findChildren(QLabel) if label.objectName() == "chipValue")
+    reb_value = next(label for label in reb_chip.findChildren(QLabel) if label.objectName() == "chipValue")
+    assert min_value.alignment() & Qt.AlignHCenter
+    assert reb_value.alignment() & Qt.AlignHCenter
+
+    dialog.close()
+
+
+def test_player_card_profile_shows_dob_and_college_across_sports(qapp):
+    samples = [
+        ("NBA", "SF"),
+        ("NFL", "WR"),
+        ("NHL", "LW"),
+        ("MLB", "CF"),
+        ("MLS", "FW"),
+    ]
+
+    for sport, position in samples:
+        dialog = PlayerCardDialog(
+            {
+                "sport": sport,
+                "playerName": f"{sport} Player",
+                "jersey": "1",
+                "position": position,
+                "teamTricode": "AAA",
+                "rowStats": {},
+            }
+        )
+        dialog.apply_profile(
+            {
+                "displayName": f"{sport} Player",
+                "position": position,
+                "jersey": "1",
+                "height": "6'3\"",
+                "weight": "210 lbs",
+                "age": "27",
+                "experience": "5",
+                "dateOfBirth": "1998-01-15",
+                "college": "North Carolina",
+                "shootsCatches": "L",
+                "bats": "R",
+                "throws": "R",
+            }
+        )
+        qapp.processEvents()
+
+        bio_labels = _grid_labels(dialog.bio_grid, "infoKey")
+
+        assert "DOB" in bio_labels
+        assert "College" in bio_labels
+
+        dialog.close()
 
 
 def test_player_card_status_badge_prefers_profile_alerts(qapp):

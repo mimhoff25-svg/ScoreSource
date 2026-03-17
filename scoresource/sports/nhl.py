@@ -120,7 +120,7 @@ def format_clock(clock_raw: Any) -> str:
     match = re.match(r"^(\d+):(\d{2})$", clock_raw)
     if match:
         return f"{int(match.group(1))}:{int(match.group(2)):02d}"
-    return text
+    return clock_raw
 
 
 def _period_label(period: int | None, status_text: str | None = None) -> str:
@@ -135,19 +135,97 @@ def _period_label(period: int | None, status_text: str | None = None) -> str:
 
 
 def _extract_start_time_text(g: Dict[str, Any]) -> str:
+    from ..common.timefmt import format_start_time, normalize_espn_time_str
     status_text = (g.get("gameStatusText") or g.get("statusText") or "").strip()
-    if status_text and any(am_pm in status_text.upper() for am_pm in ("AM", "PM")):
+    # If ESPN gave us a raw "7:00 PM EST" string, convert it to CT
+    if status_text and any(x in status_text.upper() for x in ("AM", "PM")):
+        normalized = normalize_espn_time_str(status_text)
+        if normalized:
+            return normalized
+        # Contains AM/PM but no recognized TZ — pass through as-is
         return status_text
     iso_val = g.get("gameTimeUTC") or g.get("startTime") or g.get("date")
     if isinstance(iso_val, str) and iso_val:
-        try:
-            dt = datetime.fromisoformat(iso_val.replace("Z", "+00:00"))
-            dt_local = dt.astimezone()
-            return dt_local.strftime("%I:%M %p %Z").lstrip("0")
-        except Exception as exc:
-            logger.exception("_extract_start_time_text failed for %r", iso_val)
-            pass
+        result = format_start_time(iso_val)
+        if result != "Starts TBA":
+            return result
     return status_text or "Scheduled"
+
+
+def _normalize_tricode(tricode: str | None) -> str:
+    tri = (tricode or "").upper()
+    return TRICODE_ALIASES.get(tri, tri)
+
+
+def safe_score(team: Dict[str, Any]) -> int:
+    val = team.get("score")
+    if val in (None, ""):
+        val = team.get("points") or team.get("scoreTotal")
+    try:
+        return int(val)
+    except Exception:
+        return int(val or 0)
+
+
+def _status_from_game(g: Dict[str, Any]) -> str:
+    gs = g.get("gameStatus")
+    if gs == 3:
+        return "final"
+    status_text = str(g.get("status") or "").strip().lower()
+    if status_text in ("final", "post"):
+        return "final"
+    if status_text in ("live", "in", "in_progress"):
+        return "live"
+    if status_text in ("upcoming", "pre"):
+        return "upcoming"
+    if gs in (1, 0, None):
+        return "upcoming"
+    return "live"
+
+
+def _game_status_int_from_value(value: Any) -> int:
+    if isinstance(value, int):
+        if value in (1, 2, 3):
+            return value
+        return 2
+    text = str(value or "").strip().lower()
+    if text in ("final", "post"):
+        return 3
+    if text in ("upcoming", "pre", "scheduled"):
+        return 1
+    if text in ("live", "in", "in_progress"):
+        return 2
+    return 2
+
+
+def _coerce_cached_game_shape(game: Dict[str, Any]) -> Dict[str, Any]:
+    # Accept cache data written by either scoresource/sports/nhl.py or scoresource/nhl.py.
+    status_int = _game_status_int_from_value(game.get("gameStatus") if "gameStatus" in game else game.get("status"))
+    period = game.get("period")
+    if isinstance(period, int):
+        period = {"current": period} if period else {}
+    elif not isinstance(period, dict):
+        period = {}
+    status_text = game.get("gameStatusText") or game.get("header") or ""
+    return {
+        **game,
+        "gameStatus": status_int,
+        "gameStatusText": status_text,
+        "period": period,
+        "gameTimeUTC": game.get("gameTimeUTC") or game.get("startTime") or game.get("date"),
+    }
+
+
+def _coerce_cached_scoreboard_shape(payload: Dict[str, Any]) -> Dict[str, Any]:
+    games = payload.get("games")
+    if not isinstance(games, list):
+        return payload
+    normalized_games: List[Dict[str, Any]] = []
+    for game in games:
+        if not isinstance(game, dict):
+            continue
+        normalized_games.append(_coerce_cached_game_shape(game))
+    return {"games": normalized_games, "lines": payload.get("lines") or []}
 
 
 def _load_json(path: Path) -> Any:
@@ -273,13 +351,6 @@ def _build_line(g: Dict[str, Any]) -> str:
 
 def fetch_scores() -> Dict[str, Any]:
     now = time.monotonic()
-    if _scoreboard_cache.get("data") is None:
-        disk = _load_disk_scoreboard()
-        if disk:
-            _scoreboard_cache["data"] = disk
-            _scoreboard_cache["ts"] = now
-            return disk
-
     cached = _scoreboard_cache.get("data")
     if cached and now - _scoreboard_cache.get("ts", 0) < SCOREBOARD_TTL:
         return cached
@@ -291,7 +362,10 @@ def fetch_scores() -> Dict[str, Any]:
     except Exception:
         disk = _load_disk_scoreboard()
         if disk:
-            return disk
+            result = _coerce_cached_scoreboard_shape(disk)
+            _scoreboard_cache["data"] = result
+            _scoreboard_cache["ts"] = now
+            return result
         return {"games": [], "lines": ["No games today."]}
 
     events = data.get("events", []) or []
@@ -365,7 +439,7 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
     if cached and now - cached[0] < BOXSCORE_TTL:
         return cached[1]
 
-    board = _scoreboard_cache.get("data") or _load_disk_scoreboard() or fetch_scores()
+    board = _scoreboard_cache.get("data") or fetch_scores()
     games = board.get("games", []) if isinstance(board, dict) else []
     game = next((g for g in games if str(g.get("gameId")) == str(game_id)), None)
     if game:
@@ -406,7 +480,7 @@ def _normalize_game_for_tests(g: Dict[str, Any]) -> Dict[str, Any]:
     home = (g.get("homeTeam") or {}) or {}
     away = (g.get("awayTeam") or {}) or {}
     game_id = str(g.get("gameId") or g.get("id") or "")
-    start_time = g.get("gameTimeUTC") or g.get("gameEt") or g.get("date")
+    start_time = g.get("gameTimeUTC") or g.get("startTime") or g.get("gameEt") or g.get("date")
     period_field = g.get("period")
     if isinstance(period_field, dict):
         period = period_field.get("current")

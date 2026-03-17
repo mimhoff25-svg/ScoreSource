@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
@@ -11,7 +12,7 @@ import requests
 import logging
 
 from .common.lineups import apply_starting_lineups
-from .common.timefmt import format_start_time
+from .common.timefmt import format_start_time, normalize_espn_time_str
 from .common.utils import format_player_initial_name
 
 
@@ -50,13 +51,21 @@ _logo_cache: Dict[Tuple[str, str, str], bytes | None] = {}
 _session = requests.Session()
 _boxscore_cache: Dict[str, Tuple[float, float, Dict[str, Any]]] = {}
 _scoreboard_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
+_summary_cache: Dict[str, Tuple[float, float, Dict[str, Any]]] = {}
+_cache_lock = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
 SCOREBOARD_TTL = _env_float("SCORESOURCE_NHL_SCOREBOARD_TTL", 15.0, min_value=0.0)
-BOXSCORE_TTL_LIVE = _env_float("SCORESOURCE_NHL_BOXSCORE_TTL_LIVE", 12.0, min_value=0.0)
+SCOREBOARD_TTL_LIVE = _env_float("SCORESOURCE_NHL_SCOREBOARD_TTL_LIVE", min(SCOREBOARD_TTL, 5.0), min_value=0.0)
+SCOREBOARD_TTL_PREGAME = _env_float("SCORESOURCE_NHL_SCOREBOARD_TTL_PREGAME", SCOREBOARD_TTL, min_value=0.0)
+SCOREBOARD_TTL_FINAL = _env_float("SCORESOURCE_NHL_SCOREBOARD_TTL_FINAL", max(SCOREBOARD_TTL, 30.0), min_value=0.0)
+BOXSCORE_TTL_LIVE = _env_float("SCORESOURCE_NHL_BOXSCORE_TTL_LIVE", 3.0, min_value=0.0)
 BOXSCORE_TTL_PREGAME = _env_float("SCORESOURCE_NHL_BOXSCORE_TTL_PREGAME", 60.0, min_value=0.0)
 BOXSCORE_TTL_FINAL = _env_float("SCORESOURCE_NHL_BOXSCORE_TTL_FINAL", 60.0 * 60 * 24 * 7, min_value=0.0)
+SUMMARY_TTL_LIVE = _env_float("SCORESOURCE_NHL_SUMMARY_TTL_LIVE", 2.5, min_value=0.0)
+SUMMARY_TTL_PREGAME = _env_float("SCORESOURCE_NHL_SUMMARY_TTL_PREGAME", 30.0, min_value=0.0)
+SUMMARY_TTL_FINAL = _env_float("SCORESOURCE_NHL_SUMMARY_TTL_FINAL", 60.0 * 30, min_value=0.0)
 SCOREBOARD_TIMEOUT_SEC = _env_float("SCORESOURCE_NHL_SCOREBOARD_TIMEOUT_SEC", 5.0, min_value=1.0)
 BOXSCORE_TIMEOUT_SEC = _env_float("SCORESOURCE_NHL_BOXSCORE_TIMEOUT_SEC", 8.0, min_value=1.0)
 LOGO_TIMEOUT_SEC = _env_float("SCORESOURCE_NHL_LOGO_TIMEOUT_SEC", 5.0, min_value=1.0)
@@ -103,6 +112,30 @@ def _save_disk_scoreboard(payload: Dict[str, Any]) -> None:
     _save_json(SCOREBOARD_CACHE_PATH, payload)
 
 
+def _fetch_summary_payload(game_id: str, *, status_hint: str | None = None) -> Dict[str, Any] | None:
+    cache_key = str(game_id)
+    now = time.monotonic()
+    ttl = _summary_ttl_for_status(status_hint)
+    with _cache_lock:
+        cached = _summary_cache.get(cache_key)
+        if cached and now - cached[0] < cached[1]:
+            return cached[2]
+    try:
+        resp = _session.get(BOXSCORE_URL.format(game_id=game_id), headers=HEADERS, timeout=BOXSCORE_TIMEOUT_SEC)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as exc:
+        logger.exception("_fetch_summary_payload failed for game_id=%s: %s", game_id, exc)
+        with _cache_lock:
+            cached = _summary_cache.get(cache_key)
+            return cached[2] if cached else None
+    if not isinstance(payload, dict):
+        return None
+    with _cache_lock:
+        _summary_cache[cache_key] = (now, ttl, payload)
+    return payload
+
+
 def _to_int(val: Any) -> int:
     try:
         return int(float(val))
@@ -124,6 +157,30 @@ def _boxscore_ttl_for_status(status: str | None) -> float:
     if status == "upcoming":
         return BOXSCORE_TTL_PREGAME
     return BOXSCORE_TTL_LIVE
+
+
+def _summary_ttl_for_status(status: str | None) -> float:
+    if status == "final":
+        return SUMMARY_TTL_FINAL
+    if status == "upcoming":
+        return SUMMARY_TTL_PREGAME
+    return SUMMARY_TTL_LIVE
+
+
+def _scoreboard_ttl_for_payload(payload: Dict[str, Any] | None) -> float:
+    if not isinstance(payload, dict):
+        return SCOREBOARD_TTL
+    games = payload.get("games")
+    if not isinstance(games, list) or not games:
+        return SCOREBOARD_TTL
+    statuses = {str((g or {}).get("status") or "").lower() for g in games if isinstance(g, dict)}
+    if "live" in statuses:
+        return SCOREBOARD_TTL_LIVE
+    if "upcoming" in statuses:
+        return SCOREBOARD_TTL_PREGAME
+    if "final" in statuses:
+        return SCOREBOARD_TTL_FINAL
+    return SCOREBOARD_TTL
 
 
 def _period_label(period: int | None, status_text: str | None = None) -> str:
@@ -213,6 +270,8 @@ def _penalty_duration_seconds(play: Dict[str, Any]) -> int:
         val = play.get(key)
         if val is None and isinstance(play.get("penalty"), dict):
             val = play["penalty"].get(key)
+        if val is None and isinstance(play.get("type"), dict):
+            val = play["type"].get(key)
         if val is not None:
             try:
                 return max(60, int(float(val)) * 60)
@@ -241,6 +300,9 @@ def _penalty_is_cancelable(play: Dict[str, Any], duration: int) -> bool:
     if duration <= 0:
         return False
     text = str(play.get("text") or "").lower()
+    if isinstance(play.get("type"), dict):
+        type_info = play["type"]
+        text = f"{text} {type_info.get('text') or ''} {type_info.get('penaltyType') or ''}".lower()
     if "major" in text or "misconduct" in text or "match" in text:
         return False
     return duration <= 4 * 60
@@ -370,7 +432,7 @@ def _penalty_clocks_from_plays(
         period_len_for_play = period_lengths.get(period_num, period_len)
         if clock_secs > period_len_for_play:
             continue
-        play_elapsed = _period_start_elapsed(period_num) + clock_secs
+        play_elapsed = _period_start_elapsed(period_num) + max(0, period_len_for_play - clock_secs)
         if play_elapsed > current_elapsed:
             continue
         seq_raw = play.get("sequenceNumber")
@@ -398,12 +460,26 @@ def _penalty_clocks_from_plays(
         strength = str((play.get("strength") or {}).get("text") or "").lower()
         return "power play" in strength
 
+    def _is_penalty_play(play: Dict[str, Any]) -> bool:
+        penalty = play.get("penalty")
+        if isinstance(penalty, dict) and any(penalty.get(key) not in (None, "") for key in ("penaltyMinutes", "minutes", "penaltyType")):
+            return True
+        play_type = play.get("type")
+        if isinstance(play_type, dict) and any(
+            play_type.get(key) not in (None, "") for key in ("penaltyMinutes", "minutes", "penaltyType")
+        ):
+            return True
+        play_type_text = str((play_type or {}).get("text") or "").lower()
+        if play_type_text == "penalty":
+            return True
+        lowered = str(play.get("text") or "").lower()
+        return " penalty" in lowered or lowered.startswith("penalty ")
+
     for play_elapsed, _, play in events:
         _advance_time(play_elapsed - last_elapsed)
         last_elapsed = play_elapsed
 
-        play_type = str((play.get("type") or {}).get("text") or "").lower()
-        if play_type == "penalty":
+        if _is_penalty_play(play):
             team_id = str((play.get("team") or {}).get("id") or "")
             if not team_id:
                 continue
@@ -414,6 +490,8 @@ def _penalty_clocks_from_plays(
                 {
                     "team_id": team_id,
                     "remaining": duration,
+                    "duration": duration,
+                    "start_elapsed": play_elapsed,
                     "cancelable": _penalty_is_cancelable(play, duration),
                 }
             )
@@ -432,8 +510,28 @@ def _penalty_clocks_from_plays(
 
     _advance_time(current_elapsed - last_elapsed)
 
+    visible_indices = set(range(len(active)))
+    for idx, penalty in enumerate(active):
+        if idx not in visible_indices:
+            continue
+        for other_idx in range(idx + 1, len(active)):
+            if other_idx not in visible_indices:
+                continue
+            other = active[other_idx]
+            if penalty.get("team_id") == other.get("team_id"):
+                continue
+            if penalty.get("start_elapsed") != other.get("start_elapsed"):
+                continue
+            if int(penalty.get("duration") or 0) != int(other.get("duration") or 0):
+                continue
+            visible_indices.discard(idx)
+            visible_indices.discard(other_idx)
+            break
+
     by_team: Dict[str, list[int]] = {}
-    for penalty in active:
+    for idx, penalty in enumerate(active):
+        if idx not in visible_indices:
+            continue
         remaining = int(penalty.get("remaining") or 0)
         if remaining <= 0:
             continue
@@ -451,7 +549,12 @@ def _penalty_clocks_from_plays(
 
 def _header_from_event(status: str, status_text: str | None, period: int | None, clock: str | None, start: Any) -> str:
     if status == "upcoming":
-        return format_start_time(start)
+        # Prefer converting the raw ISO start time; fall back to normalizing
+        # ESPN's "7:00 PM EST"-style shortDetail string.
+        ct = format_start_time(start)
+        if ct == "Starts TBA" and status_text:
+            ct = normalize_espn_time_str(status_text) or status_text
+        return ct
     if status == "final":
         return status_text or "Final"
     if status_text:
@@ -463,12 +566,25 @@ def _header_from_event(status: str, status_text: str | None, period: int | None,
 
 
 def _extract_team_shots(stats_list: list[Dict[str, Any]]) -> int | None:
-    names = {"shotstotal", "shots", "shotsongoal", "sog"}
-    labels = {"shots", "shots on goal", "sog"}
+    preferred_names = {"shotstotal", "shots", "shotsongoal"}
+    preferred_labels = {"shots", "shots on goal"}
     for stat in stats_list:
         name = str(stat.get("name") or "").lower()
         label = str(stat.get("label") or stat.get("displayName") or "").lower()
-        if name in names or label in labels:
+        if name == "shootoutgoals" or label == "shootout goals":
+            continue
+        if name in preferred_names or label in preferred_labels:
+            raw = stat.get("displayValue")
+            if raw in (None, ""):
+                raw = stat.get("value")
+            return _to_int(raw)
+    for stat in stats_list:
+        abbreviation = str(stat.get("abbreviation") or "").lower()
+        name = str(stat.get("name") or "").lower()
+        label = str(stat.get("label") or stat.get("displayName") or "").lower()
+        if name == "shootoutgoals" or label == "shootout goals":
+            continue
+        if abbreviation == "sog":
             raw = stat.get("displayValue")
             if raw in (None, ""):
                 raw = stat.get("value")
@@ -489,6 +605,7 @@ def _fetch_boxscore_players(
     *,
     current_period: int | None = None,
     current_clock: Any = None,
+    status_hint: str | None = None,
 ) -> tuple[
     Dict[str, list[Dict[str, Any]]],
     Dict[str, Dict[str, Any]],
@@ -497,14 +614,11 @@ def _fetch_boxscore_players(
     int | None,
     str | None,
     Dict[str, int],
+    Dict[str, int | None],
 ]:
-    try:
-        resp = _session.get(BOXSCORE_URL.format(game_id=game_id), headers=HEADERS, timeout=BOXSCORE_TIMEOUT_SEC)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.exception("_fetch_boxscore_players network/parse failed for game_id=%s: %s", game_id, exc)
-        return {}, {}, {}, None, None, None, {}
+    data = _fetch_summary_payload(game_id, status_hint=status_hint)
+    if not isinstance(data, dict):
+        return {}, {}, {}, None, None, None, {}, {"home": None, "away": None}
 
     box = data.get("boxscore", {}) if isinstance(data, dict) else {}
     players_block = box.get("players") or []
@@ -517,10 +631,15 @@ def _fetch_boxscore_players(
     summary_period: int | None = None
     summary_status_text: str | None = None
     shootout_scores: Dict[str, int] = {}
+    summary_scores: Dict[str, int | None] = {"home": None, "away": None}
     plays: list[Dict[str, Any]] | None = None
     if isinstance(data, dict):
         comps = (data.get("header") or {}).get("competitions") or []
         comp = comps[0] if comps else {}
+        for competitor in comp.get("competitors") or []:
+            side = str(competitor.get("homeAway") or "").lower()
+            if side in summary_scores:
+                summary_scores[side] = _to_int(competitor.get("score"))
         status = comp.get("status") or {}
         summary_clock = status.get("displayClock") or status.get("clock")
         summary_period = status.get("period") if isinstance(status.get("period"), int) else None
@@ -632,15 +751,25 @@ def _fetch_boxscore_players(
             else:
                 goals = _to_int(stats.get("G"))
                 assists = _to_int(stats.get("A"))
-                points = goals + assists
-                sog = _to_int(stats.get("SOG") or stats.get("S"))
+                points = _to_int(stats.get("PTS"))
+                if points == 0 and (goals or assists):
+                    points = goals + assists
+                # ESPN's NHL skater groups expose live shots in "S"; "SOG" can be
+                # the shootout-goals column and stays zero for all skaters.
+                sog = _to_int(stats.get("S") or stats.get("SOG"))
                 pim = _to_int(stats.get("PIM"))
+                hits = _to_int(stats.get("HT"))
+                blocked_shots = _to_int(stats.get("BS"))
                 p["statistics"] = {
                     "goals": goals,
                     "assists": assists,
                     "points": points,
                     "shotsOnGoal": sog,
                     "pim": pim,
+                    "plusMinus": stats.get("+/-") or "",
+                    "toi": stats.get("TOI") or "",
+                    "hits": hits,
+                    "blockedShots": blocked_shots,
                 }
             if on_ice_flag:
                 p["statistics"]["onIce"] = True
@@ -674,6 +803,7 @@ def _fetch_boxscore_players(
         summary_period,
         summary_status_text,
         shootout_scores,
+        summary_scores,
     )
 
 
@@ -683,11 +813,12 @@ def get_scoreboard() -> Dict[str, Any]:
         disk = _load_disk_scoreboard()
         if disk:
             _scoreboard_cache["data"] = disk
-            _scoreboard_cache["ts"] = now
-            return disk
+            # Seed from disk but force an immediate live refresh attempt.
+            _scoreboard_cache["ts"] = 0.0
 
     cached = _scoreboard_cache.get("data")
-    if cached and now - _scoreboard_cache.get("ts", 0) < SCOREBOARD_TTL:
+    cache_ttl = _scoreboard_ttl_for_payload(cached)
+    if cached and now - _scoreboard_cache.get("ts", 0) < cache_ttl:
         return cached
 
     try:
@@ -718,6 +849,11 @@ def get_scoreboard() -> Dict[str, Any]:
         home = _map_team(home_raw)
         away = _map_team(away_raw)
         status = _status_from_state(state)
+        game_status_value = 2
+        if status == "upcoming":
+            game_status_value = 1
+        elif status == "final":
+            game_status_value = 3
         status_text = status_type.get("shortDetail") or status_type.get("detail") or ""
         if "intermission" in status_text.lower():
             status_text = "Intermission"
@@ -737,6 +873,7 @@ def get_scoreboard() -> Dict[str, Any]:
                 "homeTeam": home,
                 "awayTeam": away,
                 "status": status,
+                "gameStatus": game_status_value,
                 "startTime": start,
                 "header": header,
                 "gameStatusText": header,
@@ -768,6 +905,15 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
     if not game:
         return _demo_boxscore(game_id)
     header = game.get("header")
+    game_status_text = str(game.get("status") or "").lower().strip()
+    game_status_value = game.get("gameStatus")
+    if not isinstance(game_status_value, int):
+        if game_status_text == "upcoming":
+            game_status_value = 1
+        elif game_status_text == "final":
+            game_status_value = 3
+        else:
+            game_status_value = 2
     boxscore_ttl = _boxscore_ttl_for_status(game.get("status"))
     home_team = game.get("homeTeam", {})
     away_team = game.get("awayTeam", {})
@@ -778,6 +924,26 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
         current_period = period_field
     else:
         current_period = None
+    is_pregame = game_status_text == "upcoming" or game_status_value == 1
+    if is_pregame:
+        home = {**home_team, "players": []}
+        away = {**away_team, "players": []}
+        apply_starting_lineups("NHL", home, away)
+        result = {
+            "game": {
+                "gameClock": game.get("gameClock"),
+                "shotClock": None,
+                "period": game.get("period") or {},
+                "gameStatusText": header,
+                "gameStatus": game_status_value,
+            },
+            "home": home,
+            "away": away,
+            "header": header,
+            "shotclock": "--",
+        }
+        _boxscore_cache[str(game_id)] = (now, boxscore_ttl, result)
+        return result
     (
         players_by_team,
         team_stats_by_team,
@@ -786,10 +952,12 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
         summary_period,
         summary_status_text,
         shootout_scores,
+        summary_scores,
     ) = _fetch_boxscore_players(
         str(game_id),
         current_period=current_period,
         current_clock=game.get("gameClock"),
+        status_hint=game.get("status"),
     )
     home_players = players_by_team.get(home_team.get("teamId")) or players_by_team.get(home_team.get("teamTricode")) or []
     away_players = players_by_team.get(away_team.get("teamId")) or players_by_team.get(away_team.get("teamTricode")) or []
@@ -801,6 +969,10 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
         away_stats = {**away_stats, "shotsOnGoal": _sum_player_shots(away_players)}
     home = {**home_team, **home_stats, "players": home_players}
     away = {**away_team, **away_stats, "players": away_players}
+    if isinstance(summary_scores.get("home"), int):
+        home["score"] = summary_scores["home"]
+    if isinstance(summary_scores.get("away"), int):
+        away["score"] = summary_scores["away"]
     _apply_shootout_score(home, shootout_scores)
     _apply_shootout_score(away, shootout_scores)
     home_penalties = penalty_clocks.get(str(home_team.get("teamId") or "")) or []
@@ -816,12 +988,25 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
         away["penaltySeconds"] = away_penalties[0]
         away["penaltyClock"] = format_clock(away_penalties[0])
     apply_starting_lineups("NHL", home, away)
+    live_clock = summary_clock or game.get("gameClock")
+    live_period = summary_period if isinstance(summary_period, int) and summary_period > 0 else current_period
+    live_status_text = summary_status_text or game.get("gameStatusText") or header
+    header = _header_from_event(game.get("status") or "live", live_status_text, live_period, live_clock, game.get("startTime"))
+    _overlay_scoreboard_game(
+        str(game_id),
+        clock=live_clock,
+        period=live_period,
+        status_text=live_status_text,
+        home_score=home.get("score"),
+        away_score=away.get("score"),
+    )
     result = {
         "game": {
-            "gameClock": summary_clock or game.get("gameClock"),
+            "gameClock": live_clock,
             "shotClock": None,
-            "period": {"current": summary_period} if summary_period else (game.get("period") or {}),
-            "gameStatusText": summary_status_text or header,
+            "period": {"current": live_period} if live_period else (game.get("period") or {}),
+            "gameStatusText": header,
+            "gameStatus": game_status_value,
         },
         "home": home,
         "away": away,
@@ -981,6 +1166,55 @@ def _line(g: Dict[str, Any]) -> str:
     away = g.get("awayTeam", {}) or {}
     home = g.get("homeTeam", {}) or {}
     return f"{away.get('teamTricode','AWY')} {away.get('score',0)} @ {home.get('teamTricode','HME')} {home.get('score',0)} ({g.get('header','')})"
+
+
+def _overlay_scoreboard_game(
+    game_id: str,
+    *,
+    clock: str | None = None,
+    period: int | None = None,
+    status_text: str | None = None,
+    home_score: int | None = None,
+    away_score: int | None = None,
+) -> None:
+    with _cache_lock:
+        board = _scoreboard_cache.get("data")
+        if not isinstance(board, dict):
+            return
+        games = board.get("games")
+        if not isinstance(games, list):
+            return
+        updated = False
+        for game in games:
+            if str(game.get("gameId") or "") != str(game_id):
+                continue
+            status = str(game.get("status") or "").lower() or _status_from_state(None)
+            if isinstance(home_score, int):
+                home = game.get("homeTeam")
+                if isinstance(home, dict):
+                    home["score"] = home_score
+                    updated = True
+            if isinstance(away_score, int):
+                away = game.get("awayTeam")
+                if isinstance(away, dict):
+                    away["score"] = away_score
+                    updated = True
+            if clock not in (None, ""):
+                game["gameClock"] = clock
+                updated = True
+            if isinstance(period, int) and period > 0:
+                game["period"] = {"current": period}
+                updated = True
+            merged_status_text = status_text or game.get("gameStatusText") or game.get("header")
+            header = _header_from_event(status, merged_status_text, period, clock, game.get("startTime"))
+            if header:
+                game["header"] = header
+                game["gameStatusText"] = header
+                updated = True
+            break
+        if updated:
+            board["lines"] = [_line(g) for g in games if isinstance(g, dict)]
+            _scoreboard_cache["ts"] = time.monotonic()
 
 
 def _demo_scoreboard() -> Dict[str, Any]:

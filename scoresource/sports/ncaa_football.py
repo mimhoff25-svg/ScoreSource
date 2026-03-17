@@ -12,6 +12,7 @@ import requests
 
 SPORT = "ncaa_football"
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard"
+SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event={game_id}"
 SCOREBOARD_GROUPS: Dict[int, str] = {80: "FBS", 81: "FCS"}
 
 
@@ -47,6 +48,7 @@ _boxscore_cache: Dict[str, Tuple[float, Any]] = {}
 SCOREBOARD_TTL = _env_float("SCORESOURCE_NCAA_FOOTBALL_SCOREBOARD_TTL", 15.0, min_value=0.0)
 BOXSCORE_TTL = _env_float("SCORESOURCE_NCAA_FOOTBALL_BOXSCORE_TTL", 12.0, min_value=0.0)
 SCOREBOARD_TIMEOUT_SEC = _env_float("SCORESOURCE_NCAA_FOOTBALL_SCOREBOARD_TIMEOUT_SEC", 5.0, min_value=1.0)
+SUMMARY_TIMEOUT_SEC = _env_float("SCORESOURCE_NCAA_FOOTBALL_SUMMARY_TIMEOUT_SEC", 8.0, min_value=1.0)
 LOGO_TIMEOUT_SEC = _env_float("SCORESOURCE_NCAA_FOOTBALL_LOGO_TIMEOUT_SEC", 3.0, min_value=1.0)
 
 CACHE_ROOT = _cache_root_from_env()
@@ -196,17 +198,17 @@ def safe_score(team: Dict[str, Any]) -> int:
 
 
 def _extract_start_time_text(g: Dict[str, Any]) -> str:
+    from ..common.timefmt import format_start_time, normalize_espn_time_str
     status_text = (g.get("gameStatusText") or g.get("statusText") or "").strip()
-    if status_text and any(am_pm in status_text.upper() for am_pm in ("AM", "PM")):
-        return status_text
+    if status_text and any(x in status_text.upper() for x in ("AM", "PM")):
+        normalized = normalize_espn_time_str(status_text)
+        if normalized:
+            return normalized
     iso_val = g.get("gameTimeUTC") or g.get("startTime") or g.get("date")
     if isinstance(iso_val, str) and iso_val:
-        try:
-            dt = datetime.fromisoformat(iso_val.replace("Z", "+00:00"))
-            dt_local = dt.astimezone()
-            return dt_local.strftime("%I:%M %p %Z").lstrip("0")
-        except Exception:
-            pass
+        result = format_start_time(iso_val)
+        if result != "Starts TBA":
+            return result
     return status_text or "Scheduled"
 
 
@@ -515,11 +517,186 @@ def _build_header(game: Dict[str, Any]) -> str:
     return f"{label} {clock}".strip() if (label or clock) else (status_text or "Live")
 
 
+def _to_int(value: Any) -> int:
+    if value in (None, ""):
+        return 0
+    match = re.search(r"-?\d+", str(value))
+    if not match:
+        return 0
+    try:
+        return int(match.group(0))
+    except Exception:
+        return 0
+
+
+def _player_entry(athlete: Dict[str, Any]) -> Dict[str, Any]:
+    first = str(athlete.get("firstName") or "").strip()
+    last = str(athlete.get("lastName") or "").strip()
+    return {
+        "id": str(athlete.get("id") or ""),
+        "firstName": first,
+        "familyName": last,
+        "displayName": str(athlete.get("displayName") or f"{first} {last}".strip()),
+        "jerseyNum": str(athlete.get("jersey") or ""),
+        "position": str((athlete.get("position") or {}).get("abbreviation") or ""),
+        "headshot": ((athlete.get("headshot") or {}).get("href") or ""),
+        "statistics": {},
+        "group": "",
+    }
+
+
+def _merge_player_total(stats: Dict[str, Any], key: str, value: Any) -> None:
+    stats[key] = _to_int(stats.get(key)) + _to_int(value)
+
+
+def _apply_section_stat(stats: Dict[str, Any], section: str, key: str, value: Any) -> None:
+    if value in (None, ""):
+        return
+    if section == "passing":
+        if key == "passingYards":
+            _merge_player_total(stats, "yardsTotal", value)
+        elif key == "passingTouchdowns":
+            _merge_player_total(stats, "touchdowns", value)
+        elif key == "interceptions":
+            _merge_player_total(stats, "interceptions", value)
+    elif section == "rushing":
+        if key == "rushingAttempts":
+            _merge_player_total(stats, "carries", value)
+        elif key == "rushingYards":
+            _merge_player_total(stats, "yardsTotal", value)
+        elif key == "rushingTouchdowns":
+            _merge_player_total(stats, "touchdowns", value)
+    elif section == "receiving":
+        if key == "receptions":
+            _merge_player_total(stats, "receptions", value)
+        elif key == "receivingYards":
+            _merge_player_total(stats, "yardsTotal", value)
+        elif key == "receivingTouchdowns":
+            _merge_player_total(stats, "touchdowns", value)
+    elif section == "defensive":
+        if key == "totalTackles":
+            stats["tacklesTotal"] = _to_int(value)
+            stats["reboundsTotal"] = _to_int(value)
+        elif key == "soloTackles":
+            total = _to_int(stats.get("tacklesTotal"))
+            solo = _to_int(value)
+            assists = max(total - solo, 0)
+            stats["tacklesAssist"] = assists
+            stats["assists"] = assists
+        elif key == "sacks":
+            _merge_player_total(stats, "sacks", value)
+        elif key == "passesDefended":
+            _merge_player_total(stats, "passesDefended", value)
+        elif key == "defensiveTouchdowns":
+            _merge_player_total(stats, "touchdowns", value)
+    elif section == "interceptions":
+        if key == "interceptions":
+            _merge_player_total(stats, "interceptions", value)
+        elif key == "interceptionTouchdowns":
+            _merge_player_total(stats, "touchdowns", value)
+    elif section in {"kickReturns", "puntReturns"}:
+        if key.endswith("Yards"):
+            _merge_player_total(stats, "yardsTotal", value)
+        elif key.endswith("Touchdowns"):
+            _merge_player_total(stats, "touchdowns", value)
+
+
+def _parse_summary_players(summary: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    boxscore = (summary.get("boxscore") or {})
+    blocks = boxscore.get("players") or []
+    players_by_team: Dict[str, List[Dict[str, Any]]] = {}
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        team = block.get("team") or {}
+        team_id = str(team.get("id") or "")
+        if not team_id:
+            continue
+        athlete_map: Dict[str, Dict[str, Any]] = {}
+        for section in block.get("statistics") or []:
+            section_name = str(section.get("name") or "").strip()
+            keys = [str(key or "") for key in (section.get("keys") or [])]
+            for athlete_row in section.get("athletes") or []:
+                athlete = athlete_row.get("athlete") or {}
+                athlete_id = str(athlete.get("id") or "")
+                if not athlete_id:
+                    continue
+                player = athlete_map.setdefault(athlete_id, _player_entry(athlete))
+                if not player.get("position"):
+                    player["position"] = str((athlete.get("position") or {}).get("abbreviation") or "")
+                if not player.get("headshot"):
+                    player["headshot"] = ((athlete.get("headshot") or {}).get("href") or "")
+                if section_name in {"passing", "rushing", "receiving"}:
+                    player["group"] = "offense"
+                elif section_name in {"defensive", "interceptions"} and not player.get("group"):
+                    player["group"] = "defense"
+                stats_values = athlete_row.get("stats") or []
+                for idx, key in enumerate(keys):
+                    value = stats_values[idx] if idx < len(stats_values) else None
+                    _apply_section_stat(player["statistics"], section_name, key, value)
+        parsed_players = list(athlete_map.values())
+        parsed_players.sort(
+            key=lambda player: (
+                -(player.get("statistics") or {}).get("touchdowns", 0),
+                -(player.get("statistics") or {}).get("yardsTotal", 0),
+                -((player.get("statistics") or {}).get("tacklesTotal", 0)),
+                str(player.get("displayName") or ""),
+            )
+        )
+        players_by_team[team_id] = parsed_players
+    return players_by_team
+
+
 def fetch_boxscore(game_id: str) -> Dict[str, Any]:
     now = time.monotonic()
     cached = _boxscore_cache.get(game_id)
     if cached and now - cached[0] < BOXSCORE_TTL:
         return cached[1]
+
+    summary = None
+    try:
+        resp = requests.get(SUMMARY_URL.format(game_id=game_id), timeout=SUMMARY_TIMEOUT_SEC)
+        resp.raise_for_status()
+        summary = resp.json()
+    except Exception:
+        summary = None
+
+    if isinstance(summary, dict):
+        header = summary.get("header") or {}
+        comp = (header.get("competitions") or [{}])[0]
+        if isinstance(comp, dict) and comp:
+            status = comp.get("status") or {}
+            status_type = status.get("type") or {}
+            state = status_type.get("state")
+            period = status.get("period") or 0
+            clock = status.get("displayClock") or status.get("clock")
+            game_status_text = status_type.get("shortDetail") or status_type.get("detail") or "Scheduled"
+            home = _map_team(comp, "home")
+            away = _map_team(comp, "away")
+            players_by_team = _parse_summary_players(summary)
+            home["players"] = players_by_team.get(str(home.get("teamId") or ""), [])
+            away["players"] = players_by_team.get(str(away.get("teamId") or ""), [])
+            game_status = 3 if state == "post" else (1 if state == "pre" else 2)
+            game = {
+                "gameId": str(game_id),
+                "homeTeam": home,
+                "awayTeam": away,
+                "gameStatus": game_status,
+                "gameStatusText": game_status_text,
+                "period": {"current": period} if period else {},
+                "gameClock": clock,
+                "gameTimeUTC": comp.get("date"),
+            }
+            result = {
+                "game": game,
+                "home": home,
+                "away": away,
+                "header": _build_header(game),
+                "shotclock": "--",
+            }
+            _boxscore_cache[game_id] = (now, result)
+            _save_disk_boxscore(game_id, result)
+            return result
 
     board = _scoreboard_cache.get("data") or _load_disk_scoreboard() or fetch_scores()
     games = board.get("games", []) if isinstance(board, dict) else []
@@ -554,4 +731,25 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
 
 
 def build_player_rows(team: Dict[str, Any]) -> List[List[str]]:
-    return []
+    rows: List[List[str]] = []
+    players = team.get("players", []) or []
+    for p in players:
+        stats = p.get("statistics", {}) or {}
+        jersey = p.get("jerseyNum") or ""
+        name = p.get("displayName") or ""
+        if not name:
+            first = str(p.get("firstName") or "").strip()
+            last = str(p.get("familyName") or "").strip()
+            if first or last:
+                name = f"{first[:1]}. {last}".strip()
+        pos = p.get("position") or ""
+        yards = stats.get("yardsTotal", 0)
+        td = stats.get("touchdowns", 0)
+        tackles = stats.get("tacklesTotal", stats.get("reboundsTotal", 0))
+        assists = stats.get("tacklesAssist", stats.get("assists", 0))
+        interceptions = stats.get("interceptions", 0)
+        if str(p.get("group") or "").lower() == "defense" or tackles:
+            rows.append([jersey, name, pos, tackles, assists, stats.get("sacks", 0), interceptions, stats.get("passesDefended", 0)])
+        else:
+            rows.append([jersey, name, pos, yards, td, stats.get("receptions", 0), stats.get("carries", 0), interceptions])
+    return rows

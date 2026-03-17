@@ -125,6 +125,7 @@ NBA_CENTER_BOTTOM_CENTER_STYLE = f"color: {TEXT_MUTED}; font-size: 14px; font-we
 NBA_CENTER_BOTTOM_RIGHT_STYLE = f"color: {TEXT_MUTED}; font-size: 16px; font-weight: 900;"
 DEFAULT_TABLE_HEADERS = ["#", "Player", "Min", "Pos", "Pts", "Reb", "Ast", "3pt"]
 NBA_SCROLL_HEADERS = ["#", "Player", "Pos", "Min", "Pts", "Reb", "Ast", "3PT", "Stl", "Blk", "TO", "+/-"]
+NBA_BROADCAST_HEADERS = ["#", "Player", "Min", "Pts", "Reb", "Ast", "3PT"]
 NFL_OFFENSE_HEADERS = ["#", "Player", "Pos", "Yds", "TD", "Rec", "Car", "Int"]
 NFL_DEFENSE_HEADERS = ["#", "Player", "Pos", "Tkl", "Ast", "Sack", "Int", "PD"]
 WINDOW_WIDTH = 1280
@@ -158,6 +159,7 @@ CENTER_SEAM_WIDTH = 220
 TOP_H_MARGIN = 24
 TOP_V_MARGIN = 24
 TOP_BOTTOM_MARGIN = 6
+RIGHT_PANEL_EDGE_MARGIN = 8
 CONTROL_BAR_HEIGHT = 22
 BOTTOM_H_MARGIN = 12
 BOTTOM_V_MARGIN = 2
@@ -168,6 +170,16 @@ BOTTOM_SECTION_SPACING = 2
 PBP_BAR_HEIGHT = 0
 BOTTOM_BAR_HEIGHT = 22
 TABLES_HEIGHT = BOTTOM_SECTION_HEIGHT - PBP_BAR_HEIGHT - BOTTOM_BAR_HEIGHT - (BOTTOM_V_MARGIN * 2) - (BOTTOM_SECTION_SPACING * 2)
+BOARD_CENTER_DIVIDER_WIDTH = 10
+BOARD_TITLE_HEIGHT = 22
+BOARD_HEADER_HEIGHT = 20
+BOARD_ROW_HEIGHT = 28
+BOARD_TITLE_FONT_PX = 12
+BOARD_HEADER_FONT_PX = 11
+BOARD_NAME_FONT_PX = 14
+BOARD_STAT_FONT_PX = 13
+BOARD_META_FONT_PX = 11
+BOARD_PLAYER_ROW_LIMIT = 5
 STATE_PATH = Path.home() / ".cache" / "scoresource" / "state.json"
 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -227,8 +239,12 @@ class CircularLogoGlow(QWidget):
         painter.fillRect(self.rect(), Qt.transparent)
         if self._pixmap:
             scale = max(0.6, min(2.2, self._logo_scale))
-            max_w = max(1, int(self.width() * scale))
-            max_h = max(1, int(self.height() * scale))
+            # Keep a small interior buffer so tall logos do not clip against the
+            # widget edge when a source asset has little transparent padding.
+            safe_w = max(1, self.width() - 10)
+            safe_h = max(1, self.height() - 12)
+            max_w = max(1, int(safe_w * scale))
+            max_h = max(1, int(safe_h * scale))
             scaled = self._pixmap.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             x = (self.width() - scaled.width()) / 2
             y = (self.height() - scaled.height()) / 2 + self._logo_y_offset
@@ -426,15 +442,23 @@ class PlayerRowDelegate(QStyledItemDelegate):
         self._line_color = QColor(line_color)
         self._line_width = line_width
 
+    def sizeHint(self, option, index):
+        size = super().sizeHint(option, index)
+        size.setHeight(max(size.height(), BOARD_ROW_HEIGHT))
+        return size
+
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
         super().paint(painter, option, index)
         if not index.data(PLAYER_DIVIDER_ROLE):
             return
         painter.save()
-        pen = QPen(self._line_color, self._line_width)
-        painter.setPen(pen)
+        left = option.rect.left() + 6
+        right = option.rect.right() - 6
         y = option.rect.bottom() - 1
-        painter.drawLine(option.rect.left(), y, option.rect.right(), y)
+        painter.setPen(QPen(QColor(180, 198, 220, 90), 1))
+        painter.drawLine(left, y - 1, right, y - 1)
+        painter.setPen(QPen(self._line_color, self._line_width))
+        painter.drawLine(left, y, right, y)
         painter.restore()
 
 
@@ -1068,7 +1092,7 @@ class CenterPanel(QFrame):
 class PlayerCardDialog(QDialog):
     STAT_MAX = 16
     GAME_STATS_MAX = 4
-    PROFILE_STATS_MAX = 4
+    PROFILE_STATS_MAX = 6
     CAREER_STATS_MAX = 5
     PORTRAIT_PANEL_WIDTH = 116
     PORTRAIT_PANEL_HEIGHT = 124
@@ -1078,7 +1102,7 @@ class PlayerCardDialog(QDialog):
     HERO_STAT_MIN_WIDTH = 92
     HERO_STAT_MAX_WIDTH = 118
     HERO_STAT_HEIGHT = 94
-    PROFILE_COLUMNS = 4
+    PROFILE_COLUMNS = 3
     GAME_STATS_COLUMNS = 2
     CAREER_STATS_COLUMNS = 5
     HOT_STATE_THRESHOLDS: Dict[str, Dict[str, float]] = {
@@ -1091,8 +1115,8 @@ class PlayerCardDialog(QDialog):
         "MLS": {"G": 1, "A": 2, "SOG": 4, "SV": 6},
     }
     DEFAULT_CARD_LAYOUT: Dict[str, List[str]] = {
-        "profile_order": ["Ht", "Wt", "Age", "Exp"],
-        "profile_extras": ["DOB"],
+        "profile_order": ["Ht", "Wt", "Age", "Exp", "DOB", "College"],
+        "profile_extras": [],
         "live_order": ["PTS", "AST", "REB", "MIN"],
         "career_order": ["GP", "PTS", "AST", "REB"],
         "hero_live": ["PTS", "AST", "REB"],
@@ -1100,23 +1124,23 @@ class PlayerCardDialog(QDialog):
     }
     SPORT_CARD_LAYOUTS: Dict[str, Dict[str, List[str]]] = {
         "NBA": {
-            "profile_order": ["Ht", "Wt", "Age", "Exp", "College"],
+            "profile_order": ["Ht", "Wt", "Age", "Exp", "DOB", "College"],
             "profile_extras": [],
-            "live_order": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO", "+/-"],
+            "live_order": ["PTS", "MIN", "REB", "AST", "3PT", "STL", "BLK", "TO", "+/-"],
             "career_order": ["GP", "PTS", "REB", "AST", "STL", "BLK", "FG%", "3P%", "FT%"],
             "hero_live": ["PTS", "REB", "AST", "+/-", "STL", "BLK"],
             "hero_snapshot": ["PTS", "REB", "AST", "FG%", "3P%", "FT%"],
         },
         "NCAA BASKETBALL": {
-            "profile_order": ["Ht", "Wt", "Age", "Exp", "College"],
+            "profile_order": ["Ht", "Wt", "Age", "Exp", "DOB", "College"],
             "profile_extras": [],
-            "live_order": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO", "PF"],
+            "live_order": ["PTS", "MIN", "REB", "AST", "3PT", "STL", "BLK", "TO", "PF"],
             "career_order": ["GP", "PTS", "REB", "AST", "STL", "BLK", "FG%", "3P%", "FT%"],
             "hero_live": ["PTS", "REB", "AST", "STL", "BLK", "PF"],
             "hero_snapshot": ["PTS", "REB", "AST", "FG%", "3P%", "FT%"],
         },
         "NFL": {
-            "profile_order": ["Ht", "Wt", "Age", "Exp", "College"],
+            "profile_order": ["Ht", "Wt", "Age", "Exp", "DOB", "College"],
             "profile_extras": [],
             "live_order": ["YDS", "TD", "REC", "CAR", "TKL", "AST", "SACK", "INT"],
             "career_order": [
@@ -1136,7 +1160,7 @@ class PlayerCardDialog(QDialog):
             "hero_snapshot": ["PASS YDS", "PASS TD", "RUSH YDS", "REC YDS", "REC TD", "RUSH TD", "INT"],
         },
         "NCAA FOOTBALL": {
-            "profile_order": ["Ht", "Wt", "Age", "Exp", "College"],
+            "profile_order": ["Ht", "Wt", "Age", "Exp", "DOB", "College"],
             "profile_extras": [],
             "live_order": ["YDS", "TD", "REC", "CAR", "TKL", "AST", "SACK", "INT"],
             "career_order": [
@@ -1156,24 +1180,24 @@ class PlayerCardDialog(QDialog):
             "hero_snapshot": ["PASS YDS", "PASS TD", "RUSH YDS", "REC YDS", "REC TD", "RUSH TD", "INT"],
         },
         "NHL": {
-            "profile_order": ["Ht", "Wt", "Age", "Shoots"],
-            "profile_extras": ["DOB"],
+            "profile_order": ["Ht", "Wt", "Age", "Shoots", "DOB", "College"],
+            "profile_extras": [],
             "live_order": ["PTS", "G", "A", "SOG", "TOI", "HITS", "BLK", "+/-", "PIM", "SV", "SV%"],
             "career_order": ["GP", "PTS", "G", "A", "SOG", "+/-", "PIM", "SV%", "GAA", "W", "L", "SO", "TOI/G"],
             "hero_live": ["PTS", "G", "A", "SOG", "SV", "SV%"],
             "hero_snapshot": ["PTS", "G", "A", "SOG", "SV%", "SV"],
         },
         "MLB": {
-            "profile_order": ["B/T", "Ht", "Wt", "Age", "BO"],
-            "profile_extras": [],
+            "profile_order": ["B/T", "Ht", "Wt", "Age", "DOB", "College"],
+            "profile_extras": ["BO"],
             "live_order": ["AVG", "OBP", "SLG", "OPS", "HR", "RBI", "R", "H", "AB", "BB", "SO", "SB"],
             "career_order": ["GP", "AVG", "HR", "RBI", "H", "OBP", "SLG", "OPS", "SB", "SO", "ERA", "W", "L", "SV"],
             "hero_live": ["RBI", "H", "HR", "R", "SB", "SO", "IP", "SV", "AVG", "OPS"],
             "hero_snapshot": ["OPS", "AVG", "HR", "RBI", "H", "ERA", "SV"],
         },
         "MLS": {
-            "profile_order": ["Ht", "Wt", "Age", "Exp"],
-            "profile_extras": ["DOB"],
+            "profile_order": ["Ht", "Wt", "Age", "Exp", "DOB", "College"],
+            "profile_extras": [],
             "live_order": ["G", "A", "SOG", "MIN"],
             "career_order": ["APP", "G", "A", "SOG", "MIN", "YC", "RC", "CS", "SV", "GA"],
             "hero_live": ["G", "A", "SOG", "SV", "MIN"],
@@ -1277,6 +1301,7 @@ class PlayerCardDialog(QDialog):
         accent = str(self._context.get("teamColor") or ACCENT)
         self._profile: Dict[str, Any] = {}
         self._row_stats = dict(self._context.get("rowStats") or {})
+        self._normalize_row_stats_for_card()
         self._supplement_row_stats_from_context()
         self._stat_source_mode = "game"
         self._primary_stat_keys: set[str] = set()
@@ -1286,6 +1311,7 @@ class PlayerCardDialog(QDialog):
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setWindowFlag(Qt.Tool, True)
         self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setFixedSize(560, 336)
         self.setStyleSheet(self._build_style())
 
@@ -1323,7 +1349,7 @@ class PlayerCardDialog(QDialog):
 
         self.hero_stat_value = QLabel("--")
         self.hero_stat_value.setObjectName("heroStatValue")
-        self.hero_stat_value.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        self.hero_stat_value.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.hero_stat_label = QLabel("STAT")
         self.hero_stat_label.setObjectName("heroStatLabel")
         self.hero_stat_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -1332,6 +1358,7 @@ class PlayerCardDialog(QDialog):
         close_button.setObjectName("cardClose")
         close_button.setText("x")
         close_button.setAutoRaise(True)
+        close_button.setFocusPolicy(Qt.NoFocus)
         close_button.clicked.connect(self.close)
 
         self.hero_stat_wrap = QFrame()
@@ -1341,11 +1368,12 @@ class PlayerCardDialog(QDialog):
         self.hero_stat_wrap.setFixedHeight(self.HERO_STAT_HEIGHT)
         self.hero_stat_wrap.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         hero_stat_layout = QVBoxLayout(self.hero_stat_wrap)
-        hero_stat_layout.setContentsMargins(12, 10, 12, 10)
-        hero_stat_layout.setSpacing(0)
+        hero_stat_layout.setContentsMargins(13, 8, 13, 9)
+        hero_stat_layout.setSpacing(1)
         hero_stat_layout.addStretch(1)
-        hero_stat_layout.addWidget(self.hero_stat_value, 0, Qt.AlignLeft | Qt.AlignBottom)
+        hero_stat_layout.addWidget(self.hero_stat_value, 0, Qt.AlignLeft | Qt.AlignVCenter)
         hero_stat_layout.addWidget(self.hero_stat_label, 0, Qt.AlignLeft | Qt.AlignTop)
+        hero_stat_layout.addStretch(1)
 
         self.surface = QFrame()
         self.surface.setObjectName("cardSurface")
@@ -1450,6 +1478,51 @@ class PlayerCardDialog(QDialog):
         self._render_stats(self._row_stats)
         self._render_career_stats({})
         self._apply_card_state()
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key in (Qt.Key_Left, Qt.Key_Right):
+            parent = self.parentWidget()
+            step_card = getattr(parent, "_step_active_player_card", None)
+            if callable(step_card):
+                delta = -1 if key == Qt.Key_Left else 1
+                if step_card(delta):
+                    event.accept()
+                    return
+        super().keyPressEvent(event)
+
+    def _normalize_row_stats_for_card(self) -> None:
+        sport = str(self._context.get("sport") or "").strip().upper()
+        if sport not in {"NBA", "NCAA BASKETBALL"}:
+            return
+        canonical = {
+            "#": "#",
+            "PLAYER": "Player",
+            "POS": "Pos",
+            "MIN": "MIN",
+            "PTS": "PTS",
+            "REB": "REB",
+            "AST": "AST",
+            "3PT": "3PT",
+            "3P": "3PT",
+            "STL": "STL",
+            "BLK": "BLK",
+            "TO": "TO",
+            "+/-": "+/-",
+        }
+        additions: Dict[str, str] = {}
+        for key, value in list(self._row_stats.items()):
+            norm = str(key or "").strip().upper()
+            mapped = canonical.get(norm)
+            if not mapped:
+                continue
+            text = str(value or "").strip()
+            if not text:
+                continue
+            if not str(self._row_stats.get(mapped) or "").strip():
+                additions[mapped] = text
+        if additions:
+            self._row_stats.update(additions)
 
     @classmethod
     def _as_color(cls, raw: Any, fallback: str) -> QColor:
@@ -1899,9 +1972,14 @@ class PlayerCardDialog(QDialog):
     ) -> None:
         font = QFont(widget.font())
         font.setBold(bold)
-        font.setPointSize(max_size)
-        while font.pointSize() > min_size and QFontMetrics(font).horizontalAdvance(text) > max_width:
-            font.setPointSize(font.pointSize() - 1)
+        if widget.font().pixelSize() > 0:
+            font.setPixelSize(max_size)
+            while font.pixelSize() > min_size and QFontMetrics(font).horizontalAdvance(text) > max_width:
+                font.setPixelSize(font.pixelSize() - 1)
+        else:
+            font.setPointSize(max_size)
+            while font.pointSize() > min_size and QFontMetrics(font).horizontalAdvance(text) > max_width:
+                font.setPointSize(font.pointSize() - 1)
         widget.setFont(font)
 
     def _refresh_hero_stat_wrap(self) -> None:
@@ -1919,8 +1997,8 @@ class PlayerCardDialog(QDialog):
             self.hero_stat_value,
             value_text,
             max_width=available_width,
-            max_size=32,
-            min_size=18,
+            max_size=38,
+            min_size=24,
         )
         self._fit_label_font(
             self.hero_stat_label,
@@ -2098,31 +2176,35 @@ class PlayerCardDialog(QDialog):
         bench_opacity = 0.82 if state == "bench" else 1.0
         self._set_opacity(self.identity_wrap, bench_opacity)
         self._set_opacity(self.team_logo_label, 0.80 if state == "bench" else 1.0)
-        self._set_opacity(self.hero_stat_wrap, 0.88 if state == "bench" else 1.0)
-
-        glow = self.hero_stat_value.graphicsEffect()
-        if not isinstance(glow, QGraphicsDropShadowEffect):
-            glow = QGraphicsDropShadowEffect(self.hero_stat_value)
-            glow.setOffset(0, 0)
-            self.hero_stat_value.setGraphicsEffect(glow)
-        color = QColor(self._palette["accent_soft"])
+        # Avoid per-label graphics effects here. They can suppress hero-number
+        # glyph rendering in the live card window, especially on the stat tile.
+        if self.hero_stat_value.graphicsEffect() is not None:
+            self.hero_stat_value.setGraphicsEffect(None)
+        tile_glow = self.hero_stat_wrap.graphicsEffect()
+        if not isinstance(tile_glow, QGraphicsDropShadowEffect):
+            tile_glow = QGraphicsDropShadowEffect(self.hero_stat_wrap)
+            tile_glow.setOffset(0, 0)
+            self.hero_stat_wrap.setGraphicsEffect(tile_glow)
+        glow_color = QColor(self._palette["accent_soft"])
+        blur = 14
+        alpha = 70
         if state == "hot":
-            color.setAlpha(210)
-            glow.setColor(color)
-            glow.setBlurRadius(24)
+            blur = 22
+            alpha = 150
         elif state == "active":
-            color.setAlpha(120)
-            glow.setColor(color)
-            glow.setBlurRadius(14)
+            blur = 18
+            alpha = 108
         elif state == "alert":
-            color = QColor(self._palette["warning"])
-            color.setAlpha(140)
-            glow.setColor(color)
-            glow.setBlurRadius(16)
-        else:
-            color = QColor(0, 0, 0, 0)
-            glow.setColor(color)
-            glow.setBlurRadius(0)
+            glow_color = QColor(self._palette["warning"])
+            blur = 20
+            alpha = 118
+        elif state == "bench":
+            glow_color = QColor(self._palette["border_soft"])
+            blur = 10
+            alpha = 34
+        glow_color.setAlpha(alpha)
+        tile_glow.setColor(glow_color)
+        tile_glow.setBlurRadius(blur)
 
     def _refresh_meta(self) -> None:
         sport = self._sport_code()
@@ -2135,10 +2217,12 @@ class PlayerCardDialog(QDialog):
         if position:
             parts.append(position)
         minutes = ""
-        if sport in {"NBA", "NCAA BASKETBALL", "MLS"}:
+        if sport == "MLS":
             min_val = self._stat_text("MIN", "TIME")
             if min_val:
                 minutes = f"{min_val} MIN"
+        elif sport in {"NBA", "NCAA BASKETBALL"}:
+            minutes = ""
         elif sport == "NHL":
             toi_val = self._stat_text("TOI", "MIN")
             if toi_val:
@@ -2308,9 +2392,16 @@ class PlayerCardDialog(QDialog):
         return text
 
     def _game_stats_limit(self) -> int:
+        if self._sport_code() in {"NBA", "NCAA BASKETBALL"}:
+            return 4
         if self._sport_code() == "NHL" and self._role_layout_key() != "G":
             return 5
         return self.GAME_STATS_MAX
+
+    def _game_stats_columns(self) -> int:
+        if self._sport_code() in {"NBA", "NCAA BASKETBALL"}:
+            return 3
+        return self.GAME_STATS_COLUMNS
 
     def _ordered_stats(self, stats: Dict[str, Any]) -> List[tuple[str, str]]:
         raw_pairs: List[tuple[str, str]] = []
@@ -2356,6 +2447,20 @@ class PlayerCardDialog(QDialog):
         return ordered[: self.STAT_MAX]
 
     def _render_stats(self, stats: Dict[str, Any]) -> None:
+        if self._sport_code() in {"NBA", "NCAA BASKETBALL"}:
+            self.stat_grid.setHorizontalSpacing(6)
+            self.stat_grid.setVerticalSpacing(8)
+            self.stat_grid.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+            panel_layout = self.stats_panel.layout()
+            if panel_layout is not None:
+                panel_layout.setSpacing(6)
+        else:
+            self.stat_grid.setHorizontalSpacing(8)
+            self.stat_grid.setVerticalSpacing(8)
+            self.stat_grid.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            panel_layout = self.stats_panel.layout()
+            if panel_layout is not None:
+                panel_layout.setSpacing(8)
         filtered = self._ordered_stats(stats)
         if filtered:
             self._stat_source_mode = "game"
@@ -2388,7 +2493,7 @@ class PlayerCardDialog(QDialog):
             self.stat_grid,
             [(self._display_stat_label(key), value) for key, value in trimmed],
             empty_text="No player snapshot available yet.",
-            columns=self.GAME_STATS_COLUMNS,
+            columns=self._game_stats_columns(),
             variant="stat",
         )
         self._refresh_meta()
@@ -2511,6 +2616,29 @@ class PlayerCardDialog(QDialog):
             self._render_career_stats({})
         self._apply_card_state()
 
+    def apply_context(self, context: Dict[str, Any]) -> None:
+        payload = dict(context or {})
+        self._context.update(payload)
+        self._row_stats = dict(payload.get("rowStats") or {})
+        self._normalize_row_stats_for_card()
+        self._supplement_row_stats_from_context()
+        resolved_name = (
+            self._profile.get("displayName")
+            or self._profile.get("fullName")
+            or self._context.get("playerName")
+            or "Player"
+        )
+        self._set_name_text(str(resolved_name))
+        self._refresh_meta()
+        self._render_stats(self._row_stats)
+        self._render_bio(self._profile)
+        career_stats = self._profile.get("careerStats")
+        if isinstance(career_stats, dict):
+            self._render_career_stats(career_stats)
+        else:
+            self._render_career_stats({})
+        self._apply_card_state()
+
     def _render_pairs_grid(
         self,
         layout: QGridLayout,
@@ -2537,30 +2665,58 @@ class PlayerCardDialog(QDialog):
             return
 
         columns = max(1, int(columns))
+        basketball_stat_stack = (
+            variant == "stat"
+            and self._sport_code() in {"NBA", "NCAA BASKETBALL"}
+            and rows
+            and str(rows[0][0] or "").strip().upper() == "MIN"
+        )
+        stretch_columns = 3 if basketball_stat_stack else columns
         for idx in range(8):
             layout.setColumnStretch(idx, 0)
         if variant != "info":
-            for idx in range(columns):
+            for idx in range(stretch_columns):
                 layout.setColumnStretch(idx, 1)
         for idx, (label, val) in enumerate(rows):
-            row = idx // columns
-            col = idx % columns
+            row_span = 1
+            col_span = 1
+            if basketball_stat_stack:
+                if idx == 0:
+                    row = 0
+                    col = 0
+                    col_span = 3
+                else:
+                    row = 1
+                    col = idx - 1
+            else:
+                row = idx // columns
+                col = idx % columns
             chip = QFrame()
             if variant == "stat":
                 chip.setObjectName("statChip")
                 chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-                chip.setMinimumHeight(46)
+                chip.setMinimumHeight(54 if self._sport_code() in {"NBA", "NCAA BASKETBALL"} else 46)
                 chip_layout = QVBoxLayout(chip)
-                chip_layout.setContentsMargins(12, 8, 12, 7)
+                chip_layout.setContentsMargins(6, 8, 6, 7)
                 chip_layout.setSpacing(0)
                 value_label = QLabel(val)
                 value_label.setObjectName("chipValue")
                 key_label = QLabel(label)
                 key_label.setObjectName("chipKey")
-                value_label.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
-                key_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-                chip_layout.addWidget(value_label, 0, Qt.AlignLeft | Qt.AlignBottom)
-                chip_layout.addWidget(key_label, 0, Qt.AlignLeft | Qt.AlignTop)
+                is_basketball_stat = self._sport_code() in {"NBA", "NCAA BASKETBALL"}
+                if is_basketball_stat:
+                    value_label.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+                    key_label.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+                    value_size = 28 if str(label).strip().upper() == "MIN" else 24
+                    value_label.setStyleSheet(f"font-size: {value_size}px; font-weight: 900;")
+                    key_label.setStyleSheet("font-size: 11px; font-weight: 800;")
+                    chip_layout.addWidget(value_label, 0, Qt.AlignHCenter | Qt.AlignBottom)
+                    chip_layout.addWidget(key_label, 0, Qt.AlignHCenter | Qt.AlignTop)
+                else:
+                    value_label.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+                    key_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+                    chip_layout.addWidget(value_label, 0, Qt.AlignLeft | Qt.AlignBottom)
+                    chip_layout.addWidget(key_label, 0, Qt.AlignLeft | Qt.AlignTop)
             elif variant == "career":
                 chip.setObjectName("careerChip")
                 chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2593,7 +2749,7 @@ class PlayerCardDialog(QDialog):
                 value_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 chip_layout.addWidget(key_label, 0, Qt.AlignLeft | Qt.AlignVCenter)
                 chip_layout.addWidget(value_label, 1, Qt.AlignLeft | Qt.AlignVCenter)
-            layout.addWidget(chip, row, col)
+            layout.addWidget(chip, row, col, row_span, col_span)
 
     def set_headshot(self, pixmap: QPixmap | None) -> None:
         if pixmap and not pixmap.isNull():
@@ -2755,6 +2911,9 @@ class ScoreSourceWindow(QMainWindow):
         self._nba_scroll_tables: set[QTableWidget] = set()
         self._player_click_tables: set[QTableWidget] = set()
         self._active_player_card: PlayerCardDialog | None = None
+        self._active_player_card_table: QTableWidget | None = None
+        self._active_player_card_row: int | None = None
+        self._active_player_card_context: Dict[str, Any] | None = None
         self._nfl_scroll_views: dict[QWidget, QTableWidget] = {}
         self._nfl_table_team: dict[QTableWidget, Dict[str, Any]] = {}
         self._nfl_table_side: dict[QTableWidget, str] = {}
@@ -2837,8 +2996,8 @@ class ScoreSourceWindow(QMainWindow):
         self._apply_cached_state_if_available()
 
     def _resolve_headers(self, headers: list[str] | None = None) -> List[str]:
-        if self.sport_name.upper() == "NBA":
-            return list(NBA_SCROLL_HEADERS)
+        if self.sport_name.upper() in {"NBA", "NCAA BASKETBALL"}:
+            return list(NBA_BROADCAST_HEADERS)
         resolved = headers or getattr(self.backend, "sport_table_headers", None) or DEFAULT_TABLE_HEADERS
         return list(resolved)
 
@@ -3105,7 +3264,7 @@ class ScoreSourceWindow(QMainWindow):
         right_frame.setFixedSize(SIDE_SECTION_WIDTH, TOP_SECTION_HEIGHT)
         right_frame.setStyleSheet("background: transparent;")
         right_layout = QVBoxLayout(right_frame)
-        right_layout.setContentsMargins(TOP_H_MARGIN, TOP_V_MARGIN, TOP_H_MARGIN, TOP_BOTTOM_MARGIN)
+        right_layout.setContentsMargins(TOP_H_MARGIN, TOP_V_MARGIN, RIGHT_PANEL_EDGE_MARGIN, TOP_BOTTOM_MARGIN)
         right_layout.setSpacing(2)
 
         self.home_city = QLabel("", right_frame)
@@ -3168,13 +3327,13 @@ class ScoreSourceWindow(QMainWindow):
         left_logo_layout.setContentsMargins(0, CONTROL_BAR_HEIGHT, CENTER_PANEL_WIDTH // 2, 0)
         left_logo_layout.setSpacing(0)
         left_logo_layout.addStretch(1)
-        left_logo_layout.addWidget(self.away_logo_box, alignment=Qt.AlignCenter)
+        left_logo_layout.addWidget(self.away_logo_box, alignment=Qt.AlignLeft | Qt.AlignVCenter)
         left_logo_layout.addStretch(1)
         right_logo_layout = QVBoxLayout(self.right_bg)
-        right_logo_layout.setContentsMargins(CENTER_PANEL_WIDTH // 2, CONTROL_BAR_HEIGHT, 0, 0)
+        right_logo_layout.setContentsMargins((CENTER_PANEL_WIDTH // 2) + 18, CONTROL_BAR_HEIGHT, 6, 0)
         right_logo_layout.setSpacing(0)
         right_logo_layout.addStretch(1)
-        right_logo_layout.addWidget(self.home_logo_box, alignment=Qt.AlignCenter)
+        right_logo_layout.addWidget(self.home_logo_box, alignment=Qt.AlignRight | Qt.AlignVCenter)
         right_logo_layout.addStretch(1)
 
         top_layout.addWidget(left_frame)
@@ -3194,11 +3353,20 @@ class ScoreSourceWindow(QMainWindow):
         bottom_layout.setSpacing(BOTTOM_SECTION_SPACING)
 
         self.tables_frame = QFrame()
+        self.tables_frame.setObjectName("player_board_shell")
         self.tables_frame.setFixedHeight(TABLES_HEIGHT)
-        self.tables_frame.setStyleSheet("background: transparent;")
+        self.tables_frame.setStyleSheet(
+            """
+            QFrame#player_board_shell {
+                background-color: #08101a;
+                border-top: 1px solid #152131;
+                border-bottom: 1px solid #0d1621;
+            }
+            """
+        )
         tables_layout = QHBoxLayout(self.tables_frame)
         tables_layout.setContentsMargins(0, 0, 0, 0)
-        tables_layout.setSpacing(TABLE_GAP)
+        tables_layout.setSpacing(0)
 
         (
             self.away_table_frame,
@@ -3211,10 +3379,17 @@ class ScoreSourceWindow(QMainWindow):
             self.home_table_title,
         ) = self._make_table("STATS", self._table_headers)
 
-        table_width = (WINDOW_WIDTH - (BOTTOM_H_MARGIN * 2) - TABLE_GAP) // 2
+        self.tables_divider = QFrame()
+        self.tables_divider.setFixedWidth(BOARD_CENTER_DIVIDER_WIDTH)
+        self.tables_divider.setStyleSheet(
+            "background-color: #132030; border-left: 1px solid rgba(255,255,255,0.06); border-right: 1px solid rgba(0,0,0,0.45);"
+        )
+
+        table_width = (WINDOW_WIDTH - (BOTTOM_H_MARGIN * 2) - BOARD_CENTER_DIVIDER_WIDTH) // 2
         self.away_table_frame.setFixedSize(table_width, TABLES_HEIGHT)
         self.home_table_frame.setFixedSize(table_width, TABLES_HEIGHT)
         tables_layout.addWidget(self.away_table_frame)
+        tables_layout.addWidget(self.tables_divider)
         tables_layout.addWidget(self.home_table_frame)
         bottom_layout.addWidget(self.tables_frame)
 
@@ -3262,38 +3437,30 @@ class ScoreSourceWindow(QMainWindow):
 
     def _make_table(self, title: str, headers: list[str]):
         frame = QFrame()
+        frame.setObjectName("player_board_side")
         frame.setStyleSheet(
-            f"""
-            QFrame {{
-                background-color: {PANEL};
-                border-radius: 12px;
-                border: 1px solid #1c2b3c;
-            }}
+            """
+            QFrame#player_board_side {
+                background-color: #0b1220;
+                border: none;
+                border-radius: 0px;
+            }
             """
         )
-        if self.sport_name.upper() == "NBA":
-            frame.setStyleSheet(
-                f"""
-                QFrame {{
-                    background-color: {PANEL};
-                    border: none;
-                    border-radius: 0px;
-                }}
-                """
-            )
         vbox = QVBoxLayout(frame)
-        vbox.setContentsMargins(6, 2, 6, 2)
-        vbox.setSpacing(2)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
         label = QLabel(title)
         label.setObjectName("table_title")
-        label.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {ACCENT};")
-        label.setVisible(False)
-        label.setFixedHeight(0)
+        label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        label.setStyleSheet(f"font-size: {BOARD_TITLE_FONT_PX}px; font-weight: 900; color: {TEXT};")
+        label.setFixedHeight(BOARD_TITLE_HEIGHT)
         vbox.addWidget(label)
 
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setShowGrid(False)
+        table.setAlternatingRowColors(True)
         self._apply_table_column_layout(table)
         if not hasattr(self, "_player_row_delegate"):
             self._player_row_delegate = PlayerRowDelegate(self)
@@ -3303,12 +3470,15 @@ class ScoreSourceWindow(QMainWindow):
         table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
-        if self.sport_name.upper() == "NBA":
+        if self.sport_name.upper() in {"NBA", "NCAA BASKETBALL"}:
             self._configure_nba_table(table)
         else:
             QScroller.grabGesture(table.viewport(), QScroller.LeftMouseButtonGesture)
             QScroller.grabGesture(table.viewport(), QScroller.TouchGesture)
             self._configure_player_table(table)
+        table.setFrameShape(QFrame.NoFrame)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setWordWrap(False)
         if not hasattr(self, "_nfl_scroll_views"):
             self._nfl_scroll_views = {}
         self._nfl_scroll_views[table.viewport()] = table
@@ -3316,20 +3486,27 @@ class ScoreSourceWindow(QMainWindow):
         table.setStyleSheet(
             f"""
             QTableWidget {{
-                background-color: {PANEL};
-                gridline-color: #2b3e55;
+                background-color: #0b1220;
+                gridline-color: transparent;
                 color: {TEXT};
-                alternate-background-color: #0d1523;
+                border: none;
+                outline: none;
+                alternate-background-color: #0f1622;
             }}
             QHeaderView::section {{
-                background-color: #1c2a3e;
-                color: {TEXT};
-                font-weight: bold;
-                border: 0px;
-                padding: 4px;
+                background-color: #141c29;
+                color: rgba(234,244,255,0.82);
+                font-weight: 900;
+                border: none;
+                padding: 2px 4px;
             }}
             QTableWidget::item {{
-                padding: 2px 4px 2px 10px;
+                padding: 1px 4px 1px 6px;
+                border: none;
+            }}
+            QTableWidget::item:selected {{
+                background-color: rgba(255,255,255,0.06);
+                color: {TEXT};
             }}
             """
         )
@@ -3339,32 +3516,36 @@ class ScoreSourceWindow(QMainWindow):
     def _apply_table_column_layout(self, table: QTableWidget) -> None:
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Fixed)
+        header.setFixedHeight(BOARD_HEADER_HEIGHT)
+        header.setDefaultAlignment(Qt.AlignCenter)
+        table.verticalHeader().setDefaultSectionSize(BOARD_ROW_HEIGHT)
+        table.verticalHeader().setMinimumSectionSize(BOARD_ROW_HEIGHT)
         count = table.columnCount()
         if count == 0:
             return
-        if self.sport_name.upper() == "NBA":
-            table.setColumnWidth(0, 42)
+        if self.sport_name.upper() in {"NBA", "NCAA BASKETBALL"}:
+            table.setColumnWidth(0, 38)
             if count > 1:
-                table.setColumnWidth(1, NBA_PLAYER_COL_WIDTH)
+                header.setSectionResizeMode(1, QHeaderView.Stretch)
             for idx in range(2, count):
                 header_item = table.horizontalHeaderItem(idx)
                 label = header_item.text().upper() if header_item else ""
-                if label == "POS":
-                    width = NBA_POS_COL_WIDTH
-                elif label in ("MIN", "TIME"):
+                if label in ("MIN", "TIME"):
                     width = NBA_MIN_COL_WIDTH
                 elif label in ("3PT", "3P", "3PM"):
                     width = NBA_THREE_COL_WIDTH
                 else:
                     width = NBA_STAT_COL_WIDTH
                 table.setColumnWidth(idx, width)
+                header.setSectionResizeMode(idx, QHeaderView.Fixed)
+            self._polish_table_headers(table)
             return
         # Keep stat columns compact so the player name column gets more room.
-        table.setColumnWidth(0, 48)
+        table.setColumnWidth(0, 42)
         if count > 2:
-            table.setColumnWidth(2, 54)
+            table.setColumnWidth(2, 50)
         for idx in range(3, count):
-            table.setColumnWidth(idx, 56)
+            table.setColumnWidth(idx, 52)
         if count > 1:
             header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(0, QHeaderView.Fixed)
@@ -3372,6 +3553,169 @@ class ScoreSourceWindow(QMainWindow):
             header.setSectionResizeMode(2, QHeaderView.Fixed)
         for idx in range(3, count):
             header.setSectionResizeMode(idx, QHeaderView.Fixed)
+        self._polish_table_headers(table)
+
+    def _table_font(self, pixel_size: int, *, weight: int = QFont.DemiBold, stretch: int = 88) -> QFont:
+        font = QFont(self.font())
+        font.setPixelSize(pixel_size)
+        font.setWeight(weight)
+        font.setStretch(stretch)
+        return font
+
+    def _polish_table_headers(self, table: QTableWidget) -> None:
+        header = table.horizontalHeader()
+        header.setFont(self._table_font(BOARD_HEADER_FONT_PX, weight=QFont.Black, stretch=84))
+        for col in range(table.columnCount()):
+            item = table.horizontalHeaderItem(col)
+            if item is None:
+                continue
+            item.setTextAlignment(int(Qt.AlignLeft | Qt.AlignVCenter) if col == 1 else int(Qt.AlignCenter))
+
+    def _style_player_table_item(self, table: QTableWidget, item: QTableWidgetItem, col: int) -> None:
+        text = str(item.text() or "").strip()
+        lowered = text.lower()
+        placeholder = lowered in {"no stats available", "lineups tbd"}
+        header_item = table.horizontalHeaderItem(col)
+        header_text = str(header_item.text() if header_item else "").strip().upper()
+
+        if placeholder:
+            item.setFont(self._table_font(BOARD_META_FONT_PX, weight=QFont.Medium, stretch=90))
+            item.setForeground(QColor(self._with_alpha(TEXT, 0.55)))
+            return
+        if col == 0:
+            item.setFont(self._table_font(BOARD_META_FONT_PX, weight=QFont.Bold, stretch=82))
+            item.setForeground(QColor(self._with_alpha(TEXT, 0.88)))
+            return
+        if col == 1:
+            item.setFont(self._table_font(BOARD_NAME_FONT_PX, weight=QFont.Black, stretch=82))
+            item.setForeground(QColor("#f5f9ff"))
+            return
+        if header_text in {"POS", "MIN", "TIME"}:
+            item.setFont(self._table_font(BOARD_META_FONT_PX, weight=QFont.Bold, stretch=84))
+            item.setForeground(QColor(self._with_alpha(TEXT, 0.93)))
+            return
+        item.setFont(self._table_font(BOARD_STAT_FONT_PX, weight=QFont.Black, stretch=84))
+        item.setForeground(QColor(TEXT if text not in {"", "--"} else self._with_alpha(TEXT, 0.46)))
+
+    def _polish_table_contents(self, table: QTableWidget) -> None:
+        self._polish_table_headers(table)
+        for row in range(table.rowCount()):
+            table.setRowHeight(row, BOARD_ROW_HEIGHT)
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                if item is None:
+                    continue
+                if col == 1:
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                else:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self._style_player_table_item(table, item, col)
+
+    def _board_row_limit(self) -> int:
+        return BOARD_PLAYER_ROW_LIMIT
+
+    def _prefer_final_leader_board(self) -> bool:
+        return self._selected_game_status() == "final" and not self._should_show_lineups()
+
+    def _numeric_sort_value(self, value: Any) -> float:
+        if value in (None, ""):
+            return 0.0
+        text = str(value).strip()
+        if not text:
+            return 0.0
+        if ":" in text:
+            parts = text.split(":")
+            if len(parts) == 2 and all(part.isdigit() for part in parts):
+                return (int(parts[0]) * 60) + int(parts[1])
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return 0.0
+        try:
+            return float(match.group(0))
+        except Exception:
+            return 0.0
+
+    def _final_row_priority(self, headers: List[str]) -> List[str]:
+        sport = self.sport_name.upper()
+        header_set = {str(header or "").strip().upper() for header in headers}
+        preferred = {
+            "NBA": ["PTS", "REB", "AST", "3PT", "MIN"],
+            "NCAA BASKETBALL": ["PTS", "REB", "AST", "3PT", "MIN"],
+            "NHL": ["PTS", "G", "A", "SOG", "SV"],
+            "MLB": ["RBI", "HR", "AVG", "OBP", "SLG"],
+            "MLS": ["G", "A", "SOG", "YC", "RC"],
+            "NFL": ["TD", "YDS", "REC", "CAR", "Tkl", "Ast"],
+            "NCAA FOOTBALL": ["TD", "YDS", "REC", "CAR", "Tkl", "Ast"],
+        }.get(sport, ["PTS", "G", "A", "RBI", "TD", "YDS"])
+        return [label.upper() for label in preferred if label.upper() in header_set]
+
+    def _sort_rows_for_final(self, rows: List[List[str]], headers: List[str]) -> List[List[str]]:
+        if not self._prefer_final_leader_board() or len(rows) < 2:
+            return rows
+        priorities = self._final_row_priority(headers)
+        if not priorities:
+            return rows
+        index_map = {str(header or "").strip().upper(): idx for idx, header in enumerate(headers)}
+
+        def _sort_key(values: List[str]) -> tuple:
+            stats = tuple(-self._numeric_sort_value(values[index_map[key]]) for key in priorities if key in index_map and index_map[key] < len(values))
+            player_name = str(values[1] if len(values) > 1 else "")
+            return stats + (player_name,)
+
+        return sorted(rows, key=_sort_key)
+
+    def _final_player_sort_key(self, player: Dict[str, Any]) -> tuple:
+        stats = player.get("statistics", {}) or {}
+        sport = self.sport_name.upper()
+        position = str(player.get("position") or "").upper()
+        if sport in {"NBA", "NCAA BASKETBALL"}:
+            return (
+                -self._numeric_sort_value(stats.get("points")),
+                -self._numeric_sort_value(stats.get("reboundsTotal", stats.get("rebounds"))),
+                -self._numeric_sort_value(stats.get("assists")),
+                -self._numeric_sort_value(stats.get("minutes") or stats.get("minutesCalculated")),
+            )
+        if sport == "NHL":
+            if position == "G" or "saves" in stats or "savePct" in stats:
+                return (
+                    -self._numeric_sort_value(stats.get("saves")),
+                    -self._numeric_sort_value(stats.get("savePct")),
+                    self._numeric_sort_value(stats.get("goalsAllowed")),
+                )
+            return (
+                -self._numeric_sort_value(stats.get("points")),
+                -self._numeric_sort_value(stats.get("goals")),
+                -self._numeric_sort_value(stats.get("assists")),
+                -self._numeric_sort_value(stats.get("shotsOnGoal")),
+            )
+        if sport == "MLB":
+            if position in {"P", "SP", "RP", "CL"}:
+                return (
+                    -self._numeric_sort_value(stats.get("strikeOuts", stats.get("strikeouts"))),
+                    -self._numeric_sort_value(stats.get("inningsPitched")),
+                    -self._numeric_sort_value(stats.get("saves")),
+                )
+            return (
+                -self._numeric_sort_value(stats.get("rbi")),
+                -self._numeric_sort_value(stats.get("homeRuns", stats.get("homeRun"))),
+                -self._numeric_sort_value(stats.get("hits")),
+                -self._numeric_sort_value(stats.get("avg")),
+            )
+        if sport == "MLS":
+            if position == "GK":
+                return (
+                    -self._numeric_sort_value(stats.get("saves")),
+                    -self._numeric_sort_value(stats.get("savePct")),
+                )
+            return (
+                -self._numeric_sort_value(stats.get("goals")),
+                -self._numeric_sort_value(stats.get("assists")),
+                -self._numeric_sort_value(stats.get("shotsOnGoal")),
+            )
+        return (
+            -self._numeric_sort_value(stats.get("points", stats.get("goals", stats.get("touchdowns", 0)))),
+            -self._numeric_sort_value(stats.get("yardsTotal", stats.get("assists", 0))),
+        )
 
     def update_table_headers(self, headers: list[str] | None = None) -> None:
         resolved = self._resolve_headers(headers)
@@ -3386,7 +3730,7 @@ class ScoreSourceWindow(QMainWindow):
             table.setHorizontalHeaderLabels(resolved)
             self._apply_table_column_layout(table)
             self._configure_player_table(table)
-            if self.sport_name.upper() == "NBA":
+            if self.sport_name.upper() in {"NBA", "NCAA BASKETBALL"}:
                 self._configure_nba_table(table)
             table.setRowCount(0)
 
@@ -3435,23 +3779,158 @@ class ScoreSourceWindow(QMainWindow):
         table.cellClicked.connect(lambda row, col, t=table: self._on_player_cell_clicked(t, row, col))
         self._player_click_tables.add(table)
 
-    def _on_player_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
-        if col != 1:
-            return
+    def _is_player_card_row_navigable(self, table: QTableWidget | None, row: int) -> bool:
+        if not isinstance(table, QTableWidget):
+            return False
+        if row < 0 or row >= table.rowCount() or table.isRowHidden(row):
+            return False
         name_item = table.item(row, 1)
         if name_item is None:
-            return
+            return False
         player_name = str(name_item.text() or "").strip()
-        if player_name.lower() in {"", "no stats available", "lineups tbd"}:
-            return
+        return player_name.lower() not in {"", "no stats available", "lineups tbd"}
 
+    def _player_card_row_sequence(self) -> List[tuple[QTableWidget, int]]:
+        rows: List[tuple[QTableWidget, int]] = []
+        for table in (getattr(self, "away_table", None), getattr(self, "home_table", None)):
+            if not isinstance(table, QTableWidget):
+                continue
+            for row in range(table.rowCount()):
+                if self._is_player_card_row_navigable(table, row):
+                    rows.append((table, row))
+        return rows
+
+    def _clear_active_player_card_refs(self, dialog: PlayerCardDialog | None = None) -> None:
+        if dialog is not None and dialog is not self._active_player_card:
+            return
+        self._active_player_card = None
+        self._active_player_card_table = None
+        self._active_player_card_row = None
+        self._active_player_card_context = None
+
+    def _current_player_context_for_row(
+        self,
+        table: QTableWidget,
+        row: int,
+    ) -> Dict[str, Any] | None:
+        if not self._is_player_card_row_navigable(table, row):
+            return None
+        name_item = table.item(row, 1)
+        if name_item is None:
+            return None
+        player_name = str(name_item.text() or "").strip()
         context = name_item.data(PLAYER_CONTEXT_ROLE)
         if not isinstance(context, dict):
             context = self._fallback_player_context(table, row, player_name)
+        else:
+            context = dict(context)
+        if not context:
+            return None
+        context["playerName"] = context.get("playerName") or player_name
+        table_row_stats = self._table_row_stats(table, row)
+        merged_row_stats = dict(context.get("rowStats") or {})
+        for key, value in table_row_stats.items():
+            if str(value or "").strip():
+                merged_row_stats[key] = value
+        context["rowStats"] = merged_row_stats
+        if not str(context.get("position") or "").strip():
+            context["position"] = str(merged_row_stats.get("Pos") or merged_row_stats.get("Position") or "").strip()
+        return context
+
+    def _find_player_row_for_context(
+        self,
+        context: Dict[str, Any] | None,
+    ) -> tuple[QTableWidget, int] | None:
+        target = context if isinstance(context, dict) else {}
+        target_id = str(target.get("playerId") or "").strip()
+        target_name = str(target.get("playerName") or "").strip().lower()
+        target_team = str(target.get("teamTricode") or "").strip().upper()
+        for table in (getattr(self, "away_table", None), getattr(self, "home_table", None)):
+            if not isinstance(table, QTableWidget):
+                continue
+            for row in range(table.rowCount()):
+                if not self._is_player_card_row_navigable(table, row):
+                    continue
+                name_item = table.item(row, 1)
+                if name_item is None:
+                    continue
+                row_context = name_item.data(PLAYER_CONTEXT_ROLE)
+                row_player_id = ""
+                row_player_name = str(name_item.text() or "").strip().lower()
+                row_team = ""
+                if isinstance(row_context, dict):
+                    row_player_id = str(row_context.get("playerId") or "").strip()
+                    row_player_name = str(row_context.get("playerName") or row_player_name).strip().lower()
+                    row_team = str(row_context.get("teamTricode") or "").strip().upper()
+                if target_id and row_player_id and row_player_id == target_id:
+                    return table, row
+                if target_name and row_player_name == target_name:
+                    if not target_team or not row_team or row_team == target_team:
+                        return table, row
+        return None
+
+    def _refresh_active_player_card_from_tables(self) -> None:
+        dialog = self._active_player_card
+        if dialog is None or not dialog.isVisible():
+            return
+        located = self._find_player_row_for_context(self._active_player_card_context)
+        if located is None:
+            table = self._active_player_card_table
+            row = self._active_player_card_row
+            if not isinstance(table, QTableWidget) or not isinstance(row, int):
+                return
+            located = (table, row)
+        table, row = located
+        context = self._current_player_context_for_row(table, row)
         if not context:
             return
-        context["playerName"] = context.get("playerName") or player_name
-        context["rowStats"] = context.get("rowStats") or self._table_row_stats(table, row)
+        self._active_player_card_table = table
+        self._active_player_card_row = row
+        self._active_player_card_context = dict(context)
+        dialog.apply_context(context)
+
+    def _step_active_player_card(self, delta: int) -> bool:
+        if delta == 0 or self._active_player_card is None:
+            return False
+        sequence = self._player_card_row_sequence()
+        if not sequence:
+            return False
+
+        current_table = self._active_player_card_table
+        current_row = self._active_player_card_row
+        current_index = None
+        for idx, (table, row) in enumerate(sequence):
+            if table is current_table and row == current_row:
+                current_index = idx
+                break
+
+        if current_index is None:
+            active_name = str((self._active_player_card_context or {}).get("playerName") or "").strip().lower()
+            if active_name:
+                for idx, (table, row) in enumerate(sequence):
+                    name_item = table.item(row, 1)
+                    if name_item and str(name_item.text() or "").strip().lower() == active_name:
+                        current_index = idx
+                        break
+
+        if current_index is None:
+            current_index = 0 if delta > 0 else len(sequence) - 1
+
+        target_table, target_row = sequence[(current_index + delta) % len(sequence)]
+        try:
+            target_table.setCurrentCell(target_row, 1)
+            target_table.selectRow(target_row)
+        except Exception:
+            pass
+        QTimer.singleShot(0, lambda t=target_table, r=target_row: self._on_player_cell_clicked(t, r, 1))
+        return True
+
+    def _on_player_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
+        if col != 1:
+            return
+        context = self._current_player_context_for_row(table, row)
+        if not context:
+            return
         self._open_player_card(context, table=table, row=row)
 
     def _fallback_player_context(self, table: QTableWidget, row: int, player_name: str) -> Dict[str, Any]:
@@ -3513,10 +3992,15 @@ class ScoreSourceWindow(QMainWindow):
                 pass
         dialog = PlayerCardDialog(context, self)
         self._active_player_card = dialog
+        self._active_player_card_table = table if isinstance(table, QTableWidget) else None
+        self._active_player_card_row = row if isinstance(row, int) and row >= 0 else None
+        self._active_player_card_context = dict(context or {})
+        dialog.destroyed.connect(lambda *_args, d=dialog: self._clear_active_player_card_refs(d))
         self._position_player_card(dialog, table=table, row=row)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+        dialog.setFocus(Qt.ActiveWindowFocusReason)
         self._fetch_player_profile_async(dialog, context)
 
     def _position_player_card(
@@ -4749,7 +5233,7 @@ class ScoreSourceWindow(QMainWindow):
                 f"{right_shots}\n{right_poss}",
                 "SOG\nPOSS",
             )
-        elif self.sport_name.upper() == "NFL":
+        elif self.sport_name.upper() in {"NFL", "NCAA FOOTBALL"}:
             current_possession = (self._nfl_possession_tricode or "").upper()
             if current_possession != self._nfl_last_possession:
                 self._nfl_manual_mode.clear()
@@ -4856,9 +5340,10 @@ class ScoreSourceWindow(QMainWindow):
 
         # tables
         show_lineups = self._should_show_lineups()
-        self._set_table_titles(show_lineups)
+        self._set_table_titles(left_team, right_team, show_lineups=show_lineups)
         self.fill_team_table(self.away_table, left_team, show_lineups=show_lineups)
         self.fill_team_table(self.home_table, right_team, show_lineups=show_lineups)
+        self._refresh_active_player_card_from_tables()
         # For bottom bar, always pass away first, then home
         self._update_bottom_bar(left_team, right_team)  # away, home
         self._save_cached_state(data)
@@ -5021,13 +5506,13 @@ class ScoreSourceWindow(QMainWindow):
         if show_lineups:
             self._fill_lineup_table(table, team)
             return
-        if self.sport_name.upper() == "NFL":
+        if self.sport_name.upper() in {"NFL", "NCAA FOOTBALL"}:
             self._fill_nfl_table(table, team)
             return
         if self.sport_name.upper() == "NHL":
             self._fill_nhl_table(table, team)
             return
-        if self.sport_name.upper() == "NBA":
+        if self.sport_name.upper() in {"NBA", "NCAA BASKETBALL"}:
             self._fill_nba_scroll_table(table, team)
             return
         rows: List[List[str]] | None = None
@@ -5038,6 +5523,7 @@ class ScoreSourceWindow(QMainWindow):
             except Exception:
                 rows = []
         if rows:
+            rows = self._sort_rows_for_final(rows, [str(table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else "") for col in range(table.columnCount())])
             table.setRowCount(0)
             headers_count = table.columnCount()
             used_player_indices: set[int] = set()
@@ -5061,14 +5547,15 @@ class ScoreSourceWindow(QMainWindow):
                 if len(values) > 2 and not context.get("position"):
                     context["position"] = str(values[2] or "")
                 self._set_player_context_on_row(table, row, context)
+            self._polish_table_contents(table)
             return
 
         table.setRowCount(0)
         headers_count = table.columnCount()
 
         # NFL uses different stat mapping than NBA
-        is_nfl = self.sport_name.upper() == "NFL"
-        is_nba = self.sport_name.upper() == "NBA"
+        is_nfl = self.sport_name.upper() in {"NFL", "NCAA FOOTBALL"}
+        is_nba = self.sport_name.upper() in {"NBA", "NCAA BASKETBALL"}
         players = team.get("players", []) or []
         divider_row = None
         if is_nba:
@@ -5099,6 +5586,9 @@ class ScoreSourceWindow(QMainWindow):
                 players = on_court[:5] + off_court + on_court[5:]
             else:
                 players = sorted(players, key=_order)
+            if self._prefer_final_leader_board():
+                divider_row = None
+                players = sorted(players, key=self._final_player_sort_key)
         else:
             players = sorted(
                 players,
@@ -5152,6 +5642,7 @@ class ScoreSourceWindow(QMainWindow):
             if not context.get("playerName"):
                 context["playerName"] = name
             self._set_player_context_on_row(table, row, context)
+        self._polish_table_contents(table)
 
     def _fill_nfl_table(self, table: QTableWidget, team: Dict[str, Any]) -> None:
         players = team.get("players", []) or []
@@ -5169,6 +5660,7 @@ class ScoreSourceWindow(QMainWindow):
                 else:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            self._polish_table_contents(table)
             return
 
         offense: list[dict[str, Any]] = []
@@ -5204,6 +5696,7 @@ class ScoreSourceWindow(QMainWindow):
             row_stats = self._row_stats_from_values(table, values)
             context = self._build_player_context(team, p, row_stats=row_stats)
             self._set_player_context_on_row(table, row, context)
+        self._polish_table_contents(table)
 
     def _set_nfl_table_mode(self, table: QTableWidget, mode: str) -> None:
         headers = NFL_OFFENSE_HEADERS if mode == "offense" else NFL_DEFENSE_HEADERS
@@ -5272,6 +5765,7 @@ class ScoreSourceWindow(QMainWindow):
                 else:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, col, item)
+            self._polish_table_contents(table)
             return
 
         def _order(p: Dict[str, Any]) -> Any:
@@ -5336,6 +5830,9 @@ class ScoreSourceWindow(QMainWindow):
 
         ordered = active + inactive
         divider_row = len(active) - 1 if active and inactive else None
+        if self._prefer_final_leader_board():
+            divider_row = None
+            ordered = sorted(ordered, key=self._final_player_sort_key)
 
         for p in ordered:
             stats = p.get("statistics", {}) or {}
@@ -5372,6 +5869,7 @@ class ScoreSourceWindow(QMainWindow):
             if not context.get("playerName"):
                 context["playerName"] = name
             self._set_player_context_on_row(table, row, context)
+        self._polish_table_contents(table)
 
     def _fill_nba_scroll_table(self, table: QTableWidget, team: Dict[str, Any]) -> None:
         self._configure_nba_table(table)
@@ -5388,6 +5886,7 @@ class ScoreSourceWindow(QMainWindow):
                 else:
                     item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(0, col, item)
+            self._polish_table_contents(table)
             return
 
         def _order(p: Dict[str, Any]) -> Any:
@@ -5419,8 +5918,15 @@ class ScoreSourceWindow(QMainWindow):
         divider_row = None
         if on_court and off_court:
             divider_row = len(on_court) - 1
+        if self._prefer_final_leader_board():
+            divider_row = None
+            ordered = sorted(ordered, key=self._final_player_sort_key)
 
         table.setRowCount(len(ordered))
+        header_keys = [
+            str(table.horizontalHeaderItem(col).text() if table.horizontalHeaderItem(col) else "").strip().upper()
+            for col in range(headers_count)
+        ]
         for row, p in enumerate(ordered):
             stats = p.get("statistics", {}) or {}
             jersey = p.get("jerseyNum") or ""
@@ -5437,20 +5943,23 @@ class ScoreSourceWindow(QMainWindow):
             tov = stats.get("turnovers", stats.get("turnoversTotal", stats.get("turnover", 0)))
             plus_minus = stats.get("plusMinus", stats.get("plusMinusPoints", ""))
             three_pt = extract_three_point_made(stats)
-            values = [
-                str(jersey),
-                str(name),
-                str(pos),
-                str(minutes),
-                str(pts),
-                str(reb),
-                str(ast),
-                str(three_pt),
-                str(stl),
-                str(blk),
-                str(tov),
-                str(plus_minus),
-            ]
+            value_map = {
+                "#": jersey,
+                "PLAYER": name,
+                "POS": pos,
+                "MIN": minutes,
+                "TIME": minutes,
+                "PTS": pts,
+                "REB": reb,
+                "AST": ast,
+                "3PT": three_pt,
+                "3P": three_pt,
+                "STL": stl,
+                "BLK": blk,
+                "TO": tov,
+                "+/-": plus_minus,
+            }
+            values = [str(value_map.get(header_key, "")) for header_key in header_keys]
             for col, val in enumerate(values[:headers_count]):
                 item = QTableWidgetItem(str(val))
                 if divider_row is not None and row == divider_row:
@@ -5465,6 +5974,7 @@ class ScoreSourceWindow(QMainWindow):
             if not context.get("playerName"):
                 context["playerName"] = name
             self._set_player_context_on_row(table, row, context)
+        self._polish_table_contents(table)
 
     def _nfl_section_values(self, label: str) -> list[str]:
         return ["", label, "", "", "", "", "", ""]
@@ -5539,6 +6049,8 @@ class ScoreSourceWindow(QMainWindow):
         stats = p.get("statistics", {}) or {}
         yards = self._nfl_stat_int(stats.get("yardsTotal") or stats.get("assists"))
         touchdowns = self._nfl_stat_int(stats.get("touchdowns") or (stats.get("points") or 0) // 6)
+        if self._prefer_final_leader_board():
+            return (touchdowns, yards)
         return (yards, touchdowns)
 
     def _nfl_defense_sort(self, p: Dict[str, Any]) -> tuple[int, int]:
@@ -5577,6 +6089,7 @@ class ScoreSourceWindow(QMainWindow):
             if len(values) > 2 and not context.get("position"):
                 context["position"] = str(values[2] or "")
             self._set_player_context_on_row(table, row, context)
+        self._polish_table_contents(table)
 
     def _lineup_rows(self, team: Dict[str, Any]) -> List[List[str]]:
         players = self._lineup_players(team)
@@ -5875,9 +6388,11 @@ class ScoreSourceWindow(QMainWindow):
         self._update_scores_poll_timer(restart=True)
         self._refresh_nba_merged_ticker(force=True)
 
-    def _set_table_titles(self, show_lineups: bool) -> None:
-        left = "LINEUP" if show_lineups else "STATS"
-        right = "LINEUP" if show_lineups else "STATS"
+    def _set_table_titles(self, left_team: Dict[str, Any], right_team: Dict[str, Any], *, show_lineups: bool) -> None:
+        left_tri = self._display_tricode(left_team, "AWY")
+        right_tri = self._display_tricode(right_team, "HME")
+        left = f"{left_tri} LINEUP" if show_lineups else f"{left_tri} LEADERS"
+        right = f"{right_tri} LINEUP" if show_lineups else f"{right_tri} LEADERS"
         if getattr(self, "away_table_title", None) is not None:
             self.away_table_title.setText(left)
         if getattr(self, "home_table_title", None) is not None:
@@ -6149,6 +6664,7 @@ class ScoreSourceWindow(QMainWindow):
                 self._active_player_card.close()
             except Exception:
                 pass
+        self._clear_active_player_card_refs()
         try:
             if self.logic:
                 self.logic.stop_realtime()
@@ -8375,6 +8891,11 @@ class ScoreSourceWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         key = event.key()
+        if key in (Qt.Key_Left, Qt.Key_Right) and self._active_player_card is not None:
+            delta = -1 if key == Qt.Key_Left else 1
+            if self._step_active_player_card(delta):
+                event.accept()
+                return
         if key in (Qt.Key_Up, Qt.Key_Down):
             delta = -1 if key == Qt.Key_Up else 1
             self._step_game_selection(delta)
@@ -8763,63 +9284,63 @@ class ScoreSourceWindow(QMainWindow):
         card.setStyleSheet("background: transparent; border: none;")
 
     def _set_table_color(self, frame: QFrame, table: QTableWidget, color: str):
-        frame_bg = self._mix_color(color, PANEL, 0.18)
-        header_bg = self._mix_color(color, BG, 0.25)
-        row_line = "rgba(255,255,255,0.08)"
+        frame_bg = self._mix_color(color, "#0a1019", 0.16)
+        title_bg = self._mix_color(color, "#101722", 0.42)
+        header_bg = self._mix_color(color, "#111827", 0.28)
+        stripe_bg = self._mix_color(color, "#0d1521", 0.16)
+        row_line = "rgba(255,255,255,0.09)"
+        accent = self._with_alpha(color, 0.92)
+        is_home = frame is getattr(self, "home_table_frame", None)
+        edge_rule = f"border-right: 4px solid {accent};" if is_home else f"border-left: 4px solid {accent};"
         frame.setStyleSheet(
             f"""
-            QFrame {{
+            QFrame#player_board_side {{
                 background-color: {frame_bg};
                 border: none;
                 border-radius: 0px;
+                {edge_rule}
+            }}
+            QLabel#table_title {{
+                background-color: {title_bg};
+                color: #f5f9ff;
+                font-size: {BOARD_TITLE_FONT_PX}px;
+                font-weight: 900;
+                padding: 0 10px;
+                letter-spacing: 0.7px;
             }}
             """
         )
+        title = frame.findChild(QLabel, "table_title")
+        if title is not None:
+            title.setAlignment(Qt.AlignRight | Qt.AlignVCenter if is_home else Qt.AlignLeft | Qt.AlignVCenter)
         table.setStyleSheet(
             f"""
             QTableWidget {{
                 background-color: {frame_bg};
                 color: {TEXT};
                 border: none;
-                alternate-background-color: {self._mix_color(color, BG, 0.28)};
+                outline: none;
+                alternate-background-color: {stripe_bg};
             }}
             QHeaderView::section {{
                 background-color: {header_bg};
-                color: {TEXT};
+                color: rgba(234,244,255,0.82);
                 font-weight: 800;
                 border: none;
-                padding: 4px;
+                border-bottom: 1px solid {row_line};
+                padding: 2px 4px;
             }}
             QTableWidget::item {{
-                padding: 2px 3px 2px 6px;
-                font-weight: 700;
+                padding: 1px 4px 1px 6px;
                 border-bottom: 1px solid {row_line};
             }}
-            """
-        )
-        return
-
-        # table tint
-        table.setStyleSheet(
-            f"""
-            QTableWidget {{
-                background-color: {frame_bg};
-                gridline-color: #2b3e55;
+            QTableWidget::item:selected {{
+                background-color: rgba(255,255,255,0.06);
                 color: {TEXT};
-                alternate-background-color: {self._mix_color(color, BG, 0.32)};
-            }}
-            QHeaderView::section {{
-                background-color: {header_bg};
-                color: {TEXT};
-                font-weight: bold;
-                border: 0px;
-                padding: 6px;
-            }}
-            QTableWidget::item {{
-                padding: 4px;
             }}
             """
         )
+        self._polish_table_headers(table)
 
     def apply_team_logo_style(self, box: CircularLogoGlow, tri: str, primary: str, accent: str):
         tri_key = (tri or "").upper()

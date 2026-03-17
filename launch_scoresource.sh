@@ -11,11 +11,22 @@ mkdir -p "$LOG_DIR"
 cd "$SCRIPT_DIR"
 
 if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
-    for sock in /tmp/.X11-unix/X*; do
-        [[ -S "$sock" ]] || continue
-        export DISPLAY=":${sock##/tmp/.X11-unix/X}"
-        break
+    for preferred in 20 0 1 10; do
+        if [[ -S "/tmp/.X11-unix/X$preferred" ]]; then
+            export DISPLAY=":$preferred.0"
+            break
+        fi
     done
+    if [[ -z "${DISPLAY:-}" ]]; then
+        while IFS= read -r sock; do
+            [[ -S "$sock" ]] || continue
+            display_num="${sock##/tmp/.X11-unix/X}"
+            if [[ "$display_num" =~ ^[0-9]+$ ]] && (( display_num < 100 )); then
+                export DISPLAY=":$display_num.0"
+                break
+            fi
+        done < <(find /tmp/.X11-unix -maxdepth 1 -type s -name 'X*' | sort -V)
+    fi
 fi
 
 PY_CMD="$VENV_PY"
@@ -25,6 +36,11 @@ fi
 if [[ ! -x "$PY_CMD" ]]; then
     PY_CMD="$(command -v python3)"
 fi
+
+# Keep one live ScoreSource process so users do not end up interacting with
+# stale windows from earlier runs.
+pkill -f '/home/mike/projects/ScoreScource/.venv/bin/python -m scoresource.main' >/dev/null 2>&1 || true
+pkill -f "$LEGACY_VENV -m scoresource.main" >/dev/null 2>&1 || true
 
 {
     echo "===== ScoreSource launch $(date -Is) ====="

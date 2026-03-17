@@ -8,6 +8,7 @@ which is more reliable and doesn't require access to private WebSocket endpoints
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -53,6 +54,7 @@ class RealTimePollingClient:
             "Referer": "https://www.nba.com/",
         })
         self._last_state: Optional[RealTimeGameState] = None
+        self._last_emit_ts: float | None = None
 
     def start(self):
         """Start the polling thread."""
@@ -73,17 +75,27 @@ class RealTimePollingClient:
         while not self._stop_event.is_set():
             try:
                 state = self._fetch_live_state()
-                if state and self._has_changed(state):
+                if state:
+                    should_emit = self._should_emit_state(state)
                     self._last_state = state
-                    try:
-                        self.on_update(state)
-                    except Exception:
-                        pass  # Don't let callback errors stop polling
+                    if should_emit:
+                        self._last_emit_ts = time.monotonic()
+                        try:
+                            self.on_update(state)
+                        except Exception:
+                            pass  # Don't let callback errors stop polling
             except Exception:
                 pass  # Continue polling even if fetch fails
             
             # Wait for next poll interval
             self._stop_event.wait(REALTIME_POLL_INTERVAL)
+
+    def _should_emit_state(self, new_state: RealTimeGameState) -> bool:
+        if self._has_changed(new_state):
+            return True
+        if self._last_emit_ts is None:
+            return True
+        return (time.monotonic() - self._last_emit_ts) >= REALTIME_POLL_INTERVAL
 
     def _fetch_live_state(self) -> Optional[RealTimeGameState]:
         """
@@ -170,15 +182,24 @@ class RealTimePollingClient:
         """Format clock value to string."""
         if not clock_raw:
             return None
-        
+
         if isinstance(clock_raw, str):
-            return clock_raw
-        
+            text = clock_raw.strip()
+            if text.startswith("PT"):
+                match = re.match(r"PT(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?", text)
+                if match:
+                    minutes = int(match.group(1) or 0)
+                    seconds = int(float(match.group(2) or 0))
+                    return f"{minutes}:{seconds:02d}"
+            if ":" in text:
+                return text
+            return text
+
         if isinstance(clock_raw, (int, float)):
             minutes = int(clock_raw // 60)
             seconds = int(clock_raw % 60)
             return f"{minutes}:{seconds:02d}"
-        
+
         return str(clock_raw)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -52,6 +53,8 @@ _session = requests.Session()
 _scoreboard_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 _boxscore_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _summary_cache: Dict[str, Tuple[float, int, Dict[str, Any]]] = {}
+_roster_number_cache: Dict[str, Tuple[float, Dict[str, str], Dict[str, str]]] = {}
+_core_athlete_number_cache: Dict[str, Tuple[float, str]] = {}
 
 SCOREBOARD_TTL = _env_float("SCORESOURCE_MLB_SCOREBOARD_TTL", 15.0, min_value=0.0)
 SCOREBOARD_TIMEOUT_SEC = _env_float("SCORESOURCE_MLB_SCOREBOARD_TIMEOUT_SEC", 8.0, min_value=1.0)
@@ -63,6 +66,14 @@ BOXSCORE_TTL_LIVE = _env_float("SCORESOURCE_MLB_BOXSCORE_TTL_LIVE", 8.0, min_val
 BOXSCORE_TTL_PREGAME = _env_float("SCORESOURCE_MLB_BOXSCORE_TTL_PREGAME", 30.0, min_value=0.0)
 BOXSCORE_TTL_FINAL = _env_float("SCORESOURCE_MLB_BOXSCORE_TTL_FINAL", 300.0, min_value=0.0)
 LOGO_TIMEOUT_SEC = _env_float("SCORESOURCE_MLB_LOGO_TIMEOUT_SEC", 5.0, min_value=1.0)
+ROSTER_NUMBER_TTL_SEC = _env_float("SCORESOURCE_MLB_ROSTER_NUMBER_TTL_SEC", 60.0 * 60.0 * 6.0, min_value=0.0)
+CORE_ATHLETE_NUMBER_TTL_SEC = _env_float(
+    "SCORESOURCE_MLB_CORE_ATHLETE_NUMBER_TTL_SEC", 60.0 * 60.0 * 24.0, min_value=0.0
+)
+CORE_ATHLETE_TIMEOUT_SEC = _env_float("SCORESOURCE_MLB_CORE_ATHLETE_TIMEOUT_SEC", 2.5, min_value=0.5)
+CORE_ATHLETE_MAX_LOOKUPS_PER_TEAM = int(
+    _env_float("SCORESOURCE_MLB_CORE_ATHLETE_MAX_LOOKUPS_PER_TEAM", 25.0, min_value=0.0)
+)
 
 TEAM_PRIMARY_COLORS: Dict[str, str] = {
     "ARI": "#A71930",
@@ -153,6 +164,148 @@ def _coerce_stat_value(value: Any) -> Any:
     if re.fullmatch(r"-?\d+\.\d+", text):
         return float(text)
     return text
+
+
+def _normalize_player_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _team_roster_number_maps(team_id: str) -> tuple[Dict[str, str], Dict[str, str]]:
+    key = str(team_id or "").strip()
+    if not key:
+        return {}, {}
+    now = time.monotonic()
+    cached = _roster_number_cache.get(key)
+    if cached and now - cached[0] <= ROSTER_NUMBER_TTL_SEC:
+        return dict(cached[1]), dict(cached[2])
+
+    url = f"https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/teams/{key}/roster"
+    try:
+        resp = _session.get(url, headers=HEADERS, timeout=SUMMARY_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return (dict(cached[1]), dict(cached[2])) if cached else ({}, {})
+
+    athletes = data.get("athletes") or []
+    items: List[Dict[str, Any]] = []
+    if isinstance(athletes, list):
+        for entry in athletes:
+            if not isinstance(entry, dict):
+                continue
+            grouped = entry.get("items")
+            if isinstance(grouped, list):
+                for athlete in grouped:
+                    if isinstance(athlete, dict):
+                        items.append(athlete)
+                continue
+            items.append(entry)
+
+    by_id: Dict[str, str] = {}
+    by_name: Dict[str, str] = {}
+    for athlete in items:
+        jersey = athlete.get("jersey") or athlete.get("jerseyNum") or athlete.get("jerseyNumber")
+        jersey_text = str(jersey or "").strip()
+        if not jersey_text:
+            continue
+        aid = str(athlete.get("id") or "").strip()
+        if aid:
+            by_id[aid] = jersey_text
+        full_name = (
+            athlete.get("displayName")
+            or athlete.get("fullName")
+            or f"{athlete.get('firstName') or ''} {athlete.get('lastName') or athlete.get('familyName') or ''}"
+        )
+        norm_name = _normalize_player_name(full_name)
+        if norm_name:
+            by_name[norm_name] = jersey_text
+
+    _roster_number_cache[key] = (now, dict(by_id), dict(by_name))
+    return by_id, by_name
+
+
+def _apply_roster_numbers(team: Dict[str, Any]) -> None:
+    if not isinstance(team, dict):
+        return
+    team_id = str(team.get("teamId") or "").strip()
+    if not team_id:
+        return
+    by_id, by_name = _team_roster_number_maps(team_id)
+
+    players = team.get("players") or []
+    core_lookups = 0
+    if isinstance(players, list):
+        for player in players:
+            if not isinstance(player, dict):
+                continue
+            jersey = str(player.get("jerseyNum") or player.get("jersey") or "").strip()
+            if jersey:
+                continue
+            pid = str(player.get("id") or player.get("personId") or player.get("playerId") or "").strip()
+            resolved = by_id.get(pid, "") if pid else ""
+            if not resolved:
+                name = player.get("fullName") or player.get("displayName")
+                if not name:
+                    first = str(player.get("firstName") or "").strip()
+                    last = str(player.get("familyName") or player.get("lastName") or "").strip()
+                    name = f"{first} {last}".strip()
+                resolved = by_name.get(_normalize_player_name(name), "")
+            if not resolved and pid and core_lookups < CORE_ATHLETE_MAX_LOOKUPS_PER_TEAM:
+                resolved = _core_athlete_number(pid)
+                if resolved:
+                    core_lookups += 1
+            if resolved:
+                player["jerseyNum"] = resolved
+                player["jersey"] = resolved
+
+    lineup = team.get("startingLineup") or []
+    if isinstance(lineup, list):
+        for player in lineup:
+            if not isinstance(player, dict):
+                continue
+            jersey = str(player.get("jersey") or player.get("jerseyNum") or "").strip()
+            if jersey:
+                continue
+            pid = str(player.get("id") or player.get("playerId") or "").strip()
+            resolved = by_id.get(pid, "") if pid else ""
+            if not resolved:
+                resolved = by_name.get(_normalize_player_name(player.get("fullName") or player.get("displayName")), "")
+            if not resolved and pid and core_lookups < CORE_ATHLETE_MAX_LOOKUPS_PER_TEAM:
+                resolved = _core_athlete_number(pid)
+                if resolved:
+                    core_lookups += 1
+            if resolved:
+                player["jersey"] = resolved
+                player["jerseyNum"] = resolved
+
+
+def _core_athlete_number(player_id: str) -> str:
+    pid = str(player_id or "").strip()
+    if not pid:
+        return ""
+    now = time.monotonic()
+    cached = _core_athlete_number_cache.get(pid)
+    if cached and now - cached[0] <= CORE_ATHLETE_NUMBER_TTL_SEC:
+        return str(cached[1] or "")
+
+    url = f"https://sports.core.api.espn.com/v2/sports/baseball/leagues/mlb/athletes/{pid}?lang=en&region=us"
+    jersey = ""
+    try:
+        resp = _session.get(url, headers=HEADERS, timeout=CORE_ATHLETE_TIMEOUT_SEC)
+        resp.raise_for_status()
+        payload = resp.json()
+        if isinstance(payload, dict):
+            jersey = str(payload.get("jersey") or "").strip()
+    except Exception:
+        jersey = ""
+
+    _core_athlete_number_cache[pid] = (now, jersey)
+    return jersey
 
 
 def _status_int_from_state(state: str | None, status_text: str) -> int:
@@ -914,6 +1067,8 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
     _merge_boxscore_data_into_team(away, team_extras, team_players)
 
     apply_starting_lineups("MLB", home, away)
+    _apply_roster_numbers(home)
+    _apply_roster_numbers(away)
 
     game_block = {
         "leaguePath": league_path,

@@ -1,20 +1,48 @@
 from __future__ import annotations
 
 import json
-import os
+import logging
 import re
 import time
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Union
 
 import requests
+from requests import Session
 
+from ..common.ttl_cache import TTLCache
 from ..common.utils import format_player_initial_name
 
+# Configure module logger
+logger = logging.getLogger(__name__)
+
 SPORT = "nfl"
-SCOREBOARD_URL = "https://cdn.espn.com/core/nfl/scoreboard?xhr=1&render=false"
+SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard"
+
+# ---------------- CACHING CONFIGURATION -----------------
+# Cache TTL values (in seconds) - documented for maintainability
+SCOREBOARD_TTL = 15.0  #: Scoreboard cache duration - frequent updates during games
+BOXSCORE_TTL = 12.0    #: Boxscore cache duration - shorter for live game stats
+LOGO_TTL = 86400.0     #: Logo cache duration - 24 hours (logos change rarely)
+
+# Cache size limits to prevent memory leaks
+SCOREBOARD_CACHE_MAXSIZE = 10    #: Maximum number of scoreboard entries to cache
+BOXSCORE_CACHE_MAXSIZE = 50      #: Maximum number of boxscores to cache
+LOGO_CACHE_MAXSIZE = 100         #: Maximum number of team logos to cache
+
+# ---------------- TIMEOUT CONFIGURATION -----------------
+# API timeout values (in seconds) - documented for operational tuning
+SCOREBOARD_TIMEOUT = 8.0   #: Timeout for scoreboard API requests
+BOXSCORE_TIMEOUT = 10.0    #: Timeout for boxscore API requests
+LOGO_TIMEOUT = 5.0         #: Timeout for logo fetch requests
+ROSTER_TIMEOUT = 8.0       #: Timeout for roster API requests
+
+# ---------------- GAME STATE CONSTANTS -----------------
+# Time windows for game state detection
+LIVE_START_GRACE_SEC = 600    #: 10 minutes - grace period after scheduled start
+LIVE_START_MAX_SEC = 21600    #: 6 hours - max time to consider game as potentially live
+#: These values help detect games that have started but API hasn't updated yet
 
 # ---------------- COLORS -----------------
 TEAM_PRIMARY_COLORS: Dict[str, str] = {
@@ -131,12 +159,10 @@ TEAM_ACCENT_COLORS: Dict[str, str] = {
 TEAM_COLORS = TEAM_PRIMARY_COLORS
 TEAM_ALT_COLORS = TEAM_ACCENT_COLORS
 
-# ---------------- CACHING -----------------
+# ---------------- CACHING (using TTLCache for memory-safe caching) -----------------
+#: In-memory caches with TTL and size limits to prevent memory leaks
 _scoreboard_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
-_boxscore_cache: Dict[str, Tuple[float, Any]] = {}
-
-SCOREBOARD_TTL = 15.0
-BOXSCORE_TTL = 12.0
+_boxscore_cache: TTLCache = TTLCache(maxsize=BOXSCORE_CACHE_MAXSIZE, ttl=BOXSCORE_TTL)
 
 CACHE_ROOT = Path.home() / ".cache" / "scoresource"
 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -146,8 +172,8 @@ BOXSCORE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 LOGO_VERSION = "2025-05"
 LOGO_DIR = CACHE_ROOT / "logos" / SPORT
 LOGO_DIR.mkdir(parents=True, exist_ok=True)
-_logo_cache: Dict[Tuple[str, str, str], bytes | None] = {}
-_logo_session = requests.Session()
+_logo_cache: TTLCache = TTLCache(maxsize=LOGO_CACHE_MAXSIZE, ttl=LOGO_TTL)
+_logo_session: Session = requests.Session()
 _logo_url_map: Dict[str, str] = {}
 
 sport_table_headers = ["#", "Player", "Pos", "Yds", "TD", "Tkl", "Ast", "Pen"]
@@ -241,26 +267,18 @@ def _parse_clock_and_period(text: str | None) -> tuple[str | None, int | None]:
     return clock, period
 
 
-def _display_zone() -> ZoneInfo:
-    tz_name = os.environ.get("SCORESOURCE_TZ", "America/Chicago")
-    try:
-        return ZoneInfo(tz_name)
-    except Exception:
-        return ZoneInfo("America/Chicago")
-
-
 def _extract_start_time_text(game: Dict[str, Any]) -> str:
+    from ..common.timefmt import format_start_time, normalize_espn_time_str
     status_text = (game.get("gameStatusText") or game.get("statusText") or "").strip()
-    if status_text and any(am_pm in status_text.upper() for am_pm in ("AM", "PM")):
-        return status_text
+    if status_text and any(x in status_text.upper() for x in ("AM", "PM")):
+        normalized = normalize_espn_time_str(status_text)
+        if normalized:
+            return normalized
     iso_val = game.get("gameTimeUTC") or game.get("startTime") or game.get("date") or game.get("startDate")
     if isinstance(iso_val, str) and iso_val:
-        try:
-            dt = datetime.fromisoformat(iso_val.replace("Z", "+00:00"))
-            dt_local = dt.astimezone(_display_zone())
-            return dt_local.strftime("%a %I:%M %p CT").replace(" 0", " ")
-        except Exception:
-            pass
+        result = format_start_time(iso_val)
+        if result != "Starts TBA":
+            return result
     return status_text or "Scheduled"
 
 # ---------------- DISK IO -----------------
@@ -302,11 +320,28 @@ def _save_disk_boxscore(game_id: str, payload: Dict[str, Any]) -> None:
 # ---------------- LOGO LOADER -----------------
 
 def load_logo(team_id: str | None, tricode: str | None = "") -> bytes | None:
+    """
+    Load team logo from cache or fetch from remote.
+    
+    Uses TTLCache for automatic expiration and size-based eviction.
+    Logs all fetch operations for debugging.
+    
+    Args:
+        team_id: ESPN team ID
+        tricode: Team tricode (e.g., "DAL", "NE")
+        
+    Returns:
+        Logo image bytes or None if not available
+    """
     tc = (tricode or "").upper()
     key = (team_id or "", tc, LOGO_VERSION)
+    
+    # Check in-memory cache first
     if key in _logo_cache:
+        logger.debug(f"Logo cache hit for key={key}")
         return _logo_cache[key]
 
+    # Check file cache
     cache_ext = ".svg"
     cache_name = f"{team_id or tc or 'unknown'}-{LOGO_VERSION}{cache_ext}"
     cache_path = LOGO_DIR / cache_name
@@ -314,27 +349,33 @@ def load_logo(team_id: str | None, tricode: str | None = "") -> bytes | None:
     def _try_load_file() -> bytes | None:
         if cache_path.exists():
             try:
-                return cache_path.read_bytes()
-            except Exception:
-                return None
+                data = cache_path.read_bytes()
+                logger.debug(f"Logo file cache hit for {cache_name}")
+                return data
+            except Exception as e:
+                logger.warning(f"Failed to read cached logo {cache_name}: {e}")
         return None
 
     def _fetch_urls(urls: List[str]) -> tuple[bytes | None, str]:
         for url in urls:
             try:
-                resp = _logo_session.get(url, timeout=3)
+                resp = _logo_session.get(url, timeout=LOGO_TIMEOUT)
                 resp.raise_for_status()
                 ext = ".svg" if url.lower().endswith(".svg") else ".png"
+                logger.info(f"Fetched logo from {url}")
                 return resp.content, ext
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Failed to fetch logo from {url}: {e}")
                 continue
         return None, cache_ext
 
+    # Try file cache first
     cached = _try_load_file()
     if cached:
         _logo_cache[key] = cached
         return cached
 
+    # Build URL list and fetch
     urls: List[str] = []
     for code in filter(None, [team_id, tc]):
         url = _logo_url_map.get(str(code))
@@ -346,11 +387,13 @@ def load_logo(team_id: str | None, tricode: str | None = "") -> bytes | None:
         try:
             cache_path = cache_path.with_suffix(used_ext)
             cache_path.write_bytes(content)
-        except Exception:
-            pass
+            logger.debug(f"Saved logo to file cache: {cache_path.name}")
+        except Exception as e:
+            logger.warning(f"Failed to save logo to cache: {e}")
         _logo_cache[key] = content
         return content
 
+    logger.debug(f"No logo found for key={key}")
     _logo_cache[key] = None
     return None
 
@@ -475,23 +518,41 @@ def _build_header(game: Dict[str, Any]) -> str:
 # ---------------- PUBLIC API -----------------
 
 def fetch_scores() -> Dict[str, Any]:
+    """
+    Fetch NFL scoreboard data from ESPN API.
+    
+    Uses TTLCache for automatic cache expiration and size-based eviction.
+    Falls back to disk cache if network fails, then to demo data.
+    
+    Returns:
+        Dict with 'games' and 'lines' keys
+    """
     now = time.monotonic()
+    disk_seed = None
+
+    # Check memory cache first
     if _scoreboard_cache.get("data") is None:
-        disk = _load_disk_scoreboard()
-        if disk:
-            _scoreboard_cache["data"] = disk
-            _scoreboard_cache["ts"] = now
-            return disk
+        disk_seed = _load_disk_scoreboard()
+        if disk_seed:
+            _scoreboard_cache["data"] = disk_seed
+            # Seed from disk but force an immediate refresh attempt.
+            _scoreboard_cache["ts"] = 0.0
+            logger.debug("Scoreboard seeded from disk cache")
 
     cached = _scoreboard_cache.get("data")
     if cached and now - _scoreboard_cache.get("ts", 0) < SCOREBOARD_TTL:
+        logger.debug("Scoreboard served from memory cache")
         return cached
 
+    # Fetch from API
     try:
-        resp = _logo_session.get(SCOREBOARD_URL, timeout=5)
+        logger.info("Fetching NFL scoreboard from ESPN API...")
+        resp = _logo_session.get(SCOREBOARD_URL, timeout=SCOREBOARD_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
-    except Exception:
+        logger.info(f"Successfully fetched scoreboard with {len(data.get('events', []))} events")
+    except Exception as e:
+        logger.error(f"Failed to fetch scoreboard: {e}")
         data = None
 
     events: List[Dict[str, Any]] = []
@@ -513,6 +574,18 @@ def fetch_scores() -> Dict[str, Any]:
         clock = status_block.get("displayClock")
         start_time = ev.get("date") or ev.get("startDate")
         status_text_raw = status_block.get("shortDetail") or status_block.get("detail")
+        
+        # Check if this is the Super Bowl
+        notes = comp.get("notes", [])
+        is_super_bowl = any("Super Bowl" in note.get("headline", "") for note in notes)
+        super_bowl_name = ""
+        if is_super_bowl:
+            for note in notes:
+                headline = note.get("headline", "")
+                if "Super Bowl" in headline:
+                    super_bowl_name = headline
+                    break
+        
         home = _map_team(comp, "home")
         away = _map_team(comp, "away")
         parsed_clock, parsed_period = _parse_clock_and_period(status_text_raw)
@@ -549,10 +622,16 @@ def fetch_scores() -> Dict[str, Any]:
             "gameClock": clock,
             "gameTimeUTC": start_time,
         }
+        
+        # Add Super Bowl flags
+        if is_super_bowl:
+            game["isSuperBowl"] = True
+            game["superBowlName"] = super_bowl_name
+        
         games.append(game)
 
     if not games:
-        disk = _load_disk_scoreboard()
+        disk = cached or disk_seed or _load_disk_scoreboard()
         if disk and disk.get("games"):
             _scoreboard_cache["data"] = disk
             _scoreboard_cache["ts"] = now
@@ -567,14 +646,32 @@ def fetch_scores() -> Dict[str, Any]:
 
 
 def fetch_boxscore(game_id: str) -> Dict[str, Any]:
+    """
+    Fetch detailed boxscore for a specific NFL game.
+    
+    Uses TTLCache for automatic expiration and size-based eviction.
+    Falls back to scoreboard data if boxscore fetch fails.
+    
+    Args:
+        game_id: ESPN game ID
+        
+    Returns:
+        Dict with 'game', 'home', 'away', and 'header' keys
+    """
     now = time.monotonic()
-    cached = _boxscore_cache.get(game_id)
-    if cached and now - cached[0] < BOXSCORE_TTL:
-        return cached[1]
+    
+    # Check TTLCache - TTLCache handles expiration automatically
+    if game_id in _boxscore_cache:
+        logger.debug(f"Boxscore cache hit for game_id={game_id}")
+        return _boxscore_cache[game_id]
 
-    board = _scoreboard_cache.get("data") or _load_disk_scoreboard() or fetch_scores()
+    board = _scoreboard_cache.get("data") or fetch_scores()
     games = board.get("games", []) if isinstance(board, dict) else []
     game = next((g for g in games if str(g.get("gameId")) == str(game_id)), None)
+    if game is None:
+        disk_board = _load_disk_scoreboard() or {}
+        disk_games = disk_board.get("games", []) if isinstance(disk_board, dict) else []
+        game = next((g for g in disk_games if str(g.get("gameId")) == str(game_id)), None)
 
     # Build player lists from leaders if available
     home_players: List[Dict[str, Any]] = []
@@ -586,14 +683,16 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
         events = (data.get("games") and board.get("games")) or []
         # not reliable; instead we refetch scoreboard quickly
         try:
-            resp = _logo_session.get(SCOREBOARD_URL, timeout=5)
+            logger.debug(f"Fetching boxscore for game {game_id}")
+            resp = _logo_session.get(SCOREBOARD_URL, timeout=SCOREBOARD_TIMEOUT)
             resp.raise_for_status()
             raw = resp.json()
             content = raw.get("content", {}) if isinstance(raw, dict) else {}
             sb_data = content.get("sbData", {}) if isinstance(content, dict) else {}
             evs = sb_data.get("events", []) or raw.get("events", []) or []
             comp = next((e.get("competitions", [{}])[0] for e in evs if str(e.get("id")) == str(game_id)), None)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to fetch boxscore for game {game_id}: {e}")
             comp = None
         if comp:
             competitors = comp.get("competitors") or []
@@ -631,7 +730,10 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
         "header": header,
         "shotclock": "--",
     }
-    _boxscore_cache[game_id] = (now, result)
+    
+    # Store in TTLCache (automatically handles expiration and size limits)
+    _boxscore_cache[game_id] = result
+    logger.debug(f"Stored boxscore in cache for game_id={game_id}")
     _save_disk_boxscore(game_id, result)
     return result
 
@@ -691,6 +793,8 @@ def _normalize_game_for_tests(g: Dict[str, Any]) -> Dict[str, Any]:
         "period": period,
         "clock": clock,
         "shotClock": shot,
+        "isSuperBowl": g.get("isSuperBowl", False),
+        "superBowlName": g.get("superBowlName", ""),
     }
 
 

@@ -3,36 +3,85 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+# ESPN returns raw status text like "7:00 PM EST" for pre-game — map those to CT
+_ESPN_TZ_MAP = {
+    "EST": ZoneInfo("America/New_York"),
+    "EDT": ZoneInfo("America/New_York"),
+    "ET":  ZoneInfo("America/New_York"),
+    "PST": ZoneInfo("America/Los_Angeles"),
+    "PDT": ZoneInfo("America/Los_Angeles"),
+    "PT":  ZoneInfo("America/Los_Angeles"),
+    "MST": ZoneInfo("America/Denver"),
+    "MDT": ZoneInfo("America/Denver"),
+    "MT":  ZoneInfo("America/Denver"),
+    "CST": ZoneInfo("America/Chicago"),
+    "CDT": ZoneInfo("America/Chicago"),
+    "CT":  ZoneInfo("America/Chicago"),
+}
+_ESPN_TIME_RE = re.compile(
+    r"^(\d{1,2}:\d{2}\s*(?:AM|PM))\s+(" + "|".join(_ESPN_TZ_MAP) + r")\b",
+    re.IGNORECASE,
+)
 
-def format_start_time(ts: Any, timezone: str | None = None) -> str:
-    """
-    Friendly start-time formatter shared by all sports:
-    - Same-day: time only (e.g., '3:25 PM CT')
-    - Within 7 days: weekday + time (e.g., 'Sat 3:25 PM CT')
-    - Beyond 7 days: M/D + time (e.g., '1/08 3:25 PM CT')
-    """
-    tz_name = timezone or os.environ.get("SCORESOURCE_TZ", "America/Chicago")
+_DEFAULT_TZ = "America/Chicago"
+
+
+def _display_tz() -> ZoneInfo:
+    tz_name = (os.environ.get("SCORESOURCE_TZ") or _DEFAULT_TZ).strip() or _DEFAULT_TZ
     try:
-        tz = ZoneInfo(tz_name)
+        return ZoneInfo(tz_name)
     except Exception:
-        tz = ZoneInfo("America/Chicago")
+        return ZoneInfo(_DEFAULT_TZ)
+
+
+def _format_display_datetime(dt: datetime) -> str:
+    # Uniform display across all sports for upcoming games.
+    return dt.strftime("%a %-m/%-d %-I:%M %p %Z").replace(" 0", " ")
+
+
+def normalize_espn_time_str(text: str | None) -> str | None:
+    """
+    If *text* is an ESPN raw game-time string like '7:00 PM EST', convert it
+    into the selected display timezone and return e.g. '6:00 PM CT'. Returns
+    None if not matched so callers can fall back to the original string.
+    """
+    if not text:
+        return None
+    m = _ESPN_TIME_RE.match(text.strip())
+    if not m:
+        return None
+    time_part, tz_abbr = m.group(1).strip(), m.group(2).upper()
+    src_tz = _ESPN_TZ_MAP.get(tz_abbr)
+    if src_tz is None:
+        return None
+    display_tz = _display_tz()
+    today = datetime.now(display_tz).date()
+    try:
+        naive = datetime.strptime(f"{today} {time_part}", "%Y-%m-%d %I:%M %p")
+    except ValueError:
+        return None
+    src_dt = naive.replace(tzinfo=src_tz)
+    local_dt = src_dt.astimezone(display_tz)
+    return local_dt.strftime("%-I:%M %p %Z")
+
+
+def format_start_time(ts: Any) -> str:
+    """
+    Uniform start-time formatter shared by all sports:
+    - Always returns weekday + date + time in selected timezone
+      (e.g., 'Thu 3/12 7:00 PM CDT')
+    """
+    tz = _display_tz()
 
     dt = _to_datetime(ts, tz)
     if dt is None:
         return "Starts TBA"
-
-    now = datetime.now(tz)
-    days_ahead = (dt.date() - now.date()).days
-
-    if days_ahead == 0:
-        return dt.strftime("%-I:%M %p %Z").replace(" 0", " ")
-    if 0 < days_ahead <= 7:
-        return dt.strftime("%a %-I:%M %p %Z").replace(" 0", " ")
-    return dt.strftime("%-m/%-d %-I:%M %p %Z").replace(" 0", " ")
+    return _format_display_datetime(dt)
 
 
 def _to_datetime(ts: Any, tz: ZoneInfo) -> datetime | None:

@@ -2,6 +2,7 @@ import importlib
 
 SPORT_MODULES = [
     "scoresource.sports.nba",
+    "scoresource.sports.ncaa_basketball",
     "scoresource.sports.nfl",
     "scoresource.sports.nhl",
     "scoresource.sports.mlb",

@@ -101,10 +101,4 @@ def get_team_logo(team_id: str | None, tricode: str | None) -> bytes | None:
 
 
 def build_player_rows(team: Dict[str, Any]) -> List[List[str]]:
-    tri = (team.get("teamTricode") or team.get("teamName") or "TEAM").upper()
-    score = safe_score(team)
-    record = team.get("record") or team.get("recordShort") or "--"
-    return [
-        [tri, "Score", str(score)],
-        [tri, "Record", record],
-    ]
+    return backend.build_player_rows(team)
