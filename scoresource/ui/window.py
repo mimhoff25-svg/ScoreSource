@@ -3590,7 +3590,11 @@ class ScoreSourceWindow(QMainWindow):
             item.setFont(self._table_font(BOARD_NAME_FONT_PX, weight=QFont.Black, stretch=82))
             item.setForeground(QColor("#f5f9ff"))
             return
-        if header_text in {"POS", "MIN", "TIME"}:
+        if header_text in {"MIN", "TIME"}:
+            item.setFont(self._table_font(BOARD_META_FONT_PX, weight=QFont.Bold, stretch=84))
+            item.setForeground(QColor("#f5f9ff"))
+            return
+        if header_text == "POS":
             item.setFont(self._table_font(BOARD_META_FONT_PX, weight=QFont.Bold, stretch=84))
             item.setForeground(QColor(self._with_alpha(TEXT, 0.93)))
             return

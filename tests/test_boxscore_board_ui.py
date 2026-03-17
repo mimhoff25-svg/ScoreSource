@@ -4,6 +4,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QTableWidget
 
 from scoresource.ui.window import BOARD_PLAYER_ROW_LIMIT, BOARD_ROW_HEIGHT, NBA_BROADCAST_HEADERS, ScoreSourceWindow
@@ -159,6 +160,24 @@ def test_fill_nba_scroll_table_sorts_final_games_by_points(qapp):
     assert table.item(0, 1).text() == "S. High"
     assert table.item(0, 3).text() == "22"
     assert table.item(1, 1).text() == "F. Low"
+
+
+def test_style_player_table_item_uses_white_for_min_column(qapp):
+    table = QTableWidget(1, len(NBA_BROADCAST_HEADERS))
+    table.setHorizontalHeaderLabels(NBA_BROADCAST_HEADERS)
+
+    stub = ScoreSourceWindow.__new__(ScoreSourceWindow)
+    stub._table_font = lambda pixel_size, weight=None, stretch=None: table.font()
+    stub._with_alpha = lambda color, alpha: ScoreSourceWindow._with_alpha(stub, color, alpha)
+
+    from PySide6.QtWidgets import QTableWidgetItem
+
+    item = QTableWidgetItem("21:57")
+    table.setItem(0, 2, item)
+
+    ScoreSourceWindow._style_player_table_item(stub, table, item, 2)
+
+    assert item.foreground().color() == QColor("#f5f9ff")
 
 
 def test_fill_team_table_routes_ncaa_basketball_to_nba_board():
