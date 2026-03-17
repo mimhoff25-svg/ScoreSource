@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import os
 import re
 import time
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -86,7 +85,9 @@ _live_clock_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _shotclock_history: Dict[str, Tuple[float, Any]] = {}
 
 SCOREBOARD_TTL = _env_float("SCORESOURCE_NBA_SCOREBOARD_TTL", 15.0, min_value=0.0)
+LIVE_SCOREBOARD_TTL = _env_float("SCORESOURCE_NBA_LIVE_SCOREBOARD_TTL", 2.0, min_value=0.0)
 BOXSCORE_TTL = _env_float("SCORESOURCE_NBA_BOXSCORE_TTL", 12.0, min_value=0.0)
+LIVE_BOXSCORE_TTL = _env_float("SCORESOURCE_NBA_LIVE_BOXSCORE_TTL", 2.0, min_value=0.0)
 SHOTCLOCK_TTL = _env_float("SCORESOURCE_NBA_SHOTCLOCK_TTL", 0.5, min_value=0.0)
 LIVE_CLOCK_TTL = _env_float("SCORESOURCE_NBA_LIVE_CLOCK_TTL", 2.0, min_value=0.0)
 LIVE_TIMEOUT_SEC = _env_float("SCORESOURCE_NBA_LIVE_TIMEOUT_SEC", 3.0, min_value=1.0)
@@ -97,12 +98,25 @@ CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 SCOREBOARD_CACHE_PATH = CACHE_ROOT / "nba_scoreboard.json"
 BOXSCORE_CACHE_DIR = CACHE_ROOT / "nba_boxscores"
 BOXSCORE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+PLAYER_POSITION_CACHE_PATH = CACHE_ROOT / "nba_player_positions.json"
 
 LOGO_VERSION = "2025-05"
 LOGO_DIR = CACHE_ROOT / "logos" / SPORT
 LOGO_DIR.mkdir(parents=True, exist_ok=True)
 _logo_cache: Dict[Tuple[str, str, str], bytes | None] = {}
 _logo_session = requests.Session()
+PLAYER_POSITION_TTL = _env_float("SCORESOURCE_NBA_PLAYER_POSITION_TTL", 60.0 * 60.0 * 24.0 * 7.0, min_value=0.0)
+NBA_STATS_TIMEOUT_SEC = _env_float("SCORESOURCE_NBA_STATS_TIMEOUT_SEC", 6.0, min_value=1.0)
+_player_position_cache: Dict[str, Tuple[float, str]] = {}
+_player_position_cache_dirty = False
+NBA_STATS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Origin": "https://www.nba.com",
+    "Referer": "https://www.nba.com/",
+    "Connection": "keep-alive",
+}
 
 
 # ------------------ formatting helpers ------------------
@@ -205,26 +219,130 @@ def _save_disk_boxscore(game_id: str, payload: Dict[str, Any]) -> None:
     _save_json(path, payload)
 
 
-# ------------------ small helpers for start time ------------------
-def _display_zone() -> ZoneInfo:
-    tz_name = os.environ.get("SCORESOURCE_TZ", "America/Chicago")
+def _abbrev_position(position: str | None) -> str:
+    pos = (position or "").strip()
+    if not pos:
+        return ""
+    if len(pos) <= 3:
+        return pos.upper()
+    parts = re.split(r"[-/]", pos)
+    abbr = "-".join(part.strip()[:1].upper() for part in parts if part.strip())
+    return abbr or pos.upper()
+
+
+def _load_player_positions() -> None:
+    if _player_position_cache:
+        return
+    data = _load_json(PLAYER_POSITION_CACHE_PATH) or {}
+    if not isinstance(data, dict):
+        return
+    for pid, entry in data.items():
+        if isinstance(entry, dict):
+            pos = entry.get("pos")
+            ts = entry.get("ts")
+        else:
+            pos = entry if isinstance(entry, str) else None
+            ts = None
+        if not pos:
+            continue
+        try:
+            _player_position_cache[str(pid)] = (float(ts or 0), str(pos))
+        except Exception:
+            _player_position_cache[str(pid)] = (0.0, str(pos))
+
+
+def _save_player_positions() -> None:
+    global _player_position_cache_dirty
+    if not _player_position_cache_dirty:
+        return
+    payload = {pid: {"pos": pos, "ts": ts} for pid, (ts, pos) in _player_position_cache.items()}
+    _save_json(PLAYER_POSITION_CACHE_PATH, payload)
+    _player_position_cache_dirty = False
+
+
+def _fetch_player_position(person_id: str) -> str:
+    url = f"https://stats.nba.com/stats/commonplayerinfo?PlayerID={person_id}"
     try:
-        return ZoneInfo(tz_name)
+        resp = _logo_session.get(url, headers=NBA_STATS_HEADERS, timeout=NBA_STATS_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
     except Exception:
-        return ZoneInfo("America/Chicago")
+        return ""
+    result_sets = data.get("resultSets") or data.get("resultSet") or []
+    if not result_sets:
+        return ""
+    info = result_sets[0] or {}
+    headers = info.get("headers") or []
+    rows = info.get("rowSet") or []
+    if not headers or not rows:
+        return ""
+    try:
+        idx = headers.index("POSITION")
+    except ValueError:
+        return ""
+    first_row = rows[0] if rows else []
+    return _abbrev_position(first_row[idx] if idx < len(first_row) else "")
+
+
+def _get_player_position(person_id: str | None) -> str:
+    pid = str(person_id or "").strip()
+    if not pid:
+        return ""
+    _load_player_positions()
+    now = time.time()
+    cached = _player_position_cache.get(pid)
+    if cached and now - cached[0] <= PLAYER_POSITION_TTL:
+        return cached[1]
+    pos = _fetch_player_position(pid)
+    _player_position_cache[pid] = (now, pos)
+    global _player_position_cache_dirty
+    _player_position_cache_dirty = True
+    return pos
+
+
+def _player_position_text(player: Dict[str, Any]) -> str:
+    pos = player.get("position")
+    if isinstance(pos, dict):
+        pos = pos.get("abbreviation") or pos.get("shortName") or pos.get("displayName") or pos.get("name")
+    return _abbrev_position(str(pos or ""))
+
+
+def _apply_player_positions(team: Dict[str, Any]) -> None:
+    players = team.get("players") or []
+    if not isinstance(players, list):
+        return
+    updated = False
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        pos = _player_position_text(player)
+        if pos:
+            if player.get("position") != pos:
+                player["position"] = pos
+            continue
+        pid = player.get("personId") or player.get("id") or player.get("playerId")
+        fetched = _get_player_position(pid)
+        if not fetched:
+            continue
+        player["position"] = fetched
+        updated = True
+    if updated:
+        _save_player_positions()
 
 
 def _extract_start_time_text(g: Dict[str, Any]) -> str:
+    from ..common.timefmt import format_start_time, normalize_espn_time_str
     status_text = (g.get("gameStatusText") or "").strip()
+    if status_text and any(x in status_text.upper() for x in ("AM", "PM")):
+        normalized = normalize_espn_time_str(status_text)
+        if normalized:
+            return normalized
 
     game_time_utc = g.get("gameTimeUTC") or g.get("gameEt") or g.get("startTime")
     if isinstance(game_time_utc, str) and game_time_utc:
-        try:
-            dt = datetime.fromisoformat(game_time_utc.replace("Z", "+00:00"))
-            dt_local = dt.astimezone(_display_zone())
-            return dt_local.strftime("%a %I:%M %p CT").replace(" 0", " ")
-        except Exception:
-            pass
+        result = format_start_time(game_time_utc)
+        if result != "Starts TBA":
+            return result
 
     return status_text or "Scheduled"
 
@@ -238,6 +356,37 @@ def _current_period_from_game(game: Dict[str, Any]) -> int | None:
     return None
 
 
+def _is_live_game(game: Dict[str, Any]) -> bool:
+    status = game.get("gameStatus")
+    if isinstance(status, int):
+        return status == 2
+    if isinstance(status, str):
+        normalized = status.strip().lower()
+        if normalized in {"live", "in", "in progress", "inprogress", "ongoing"}:
+            return True
+        if normalized in {"final", "post", "scheduled", "pre", "upcoming"}:
+            return False
+    status_text = str(game.get("gameStatusText") or game.get("statusText") or "").lower()
+    if any(token in status_text for token in ("final", "scheduled", "pregame", "pre-game", "postponed")):
+        return False
+    period = _current_period_from_game(game)
+    return isinstance(period, int) and period > 0
+
+
+def _scoreboard_cache_ttl(payload: Dict[str, Any] | None) -> float:
+    games = (payload or {}).get("games") or []
+    if any(_is_live_game(game) for game in games if isinstance(game, dict)):
+        return min(SCOREBOARD_TTL, LIVE_SCOREBOARD_TTL)
+    return SCOREBOARD_TTL
+
+
+def _boxscore_cache_ttl(payload: Dict[str, Any] | None) -> float:
+    game = (payload or {}).get("game") or {}
+    if isinstance(game, dict) and _is_live_game(game):
+        return min(BOXSCORE_TTL, LIVE_BOXSCORE_TTL)
+    return BOXSCORE_TTL
+
+
 def _fetch_live_clock(game_id: str) -> Dict[str, Any] | None:
     now = time.monotonic()
     cached = _live_clock_cache.get(game_id)
@@ -248,17 +397,50 @@ def _fetch_live_clock(game_id: str) -> Dict[str, Any] | None:
         resp = _logo_session.get(url, timeout=LIVE_TIMEOUT_SEC)
         resp.raise_for_status()
         data = resp.json().get("game", {}) or {}
+        home_team = data.get("homeTeam") or {}
+        away_team = data.get("awayTeam") or {}
         result = {
             "gameClock": data.get("gameClock"),
             "shotClock": data.get("shotClock"),
             "statusText": data.get("gameStatusText"),
             "status": data.get("gameStatus"),
             "period": data.get("period"),
+            "homeScore": safe_score(home_team) if home_team else None,
+            "awayScore": safe_score(away_team) if away_team else None,
+            "homeTeam": home_team,
+            "awayTeam": away_team,
         }
         _live_clock_cache[game_id] = (now, result)
         return result
     except Exception:
         return None
+
+
+def _overlay_live_team_snapshot(team: Dict[str, Any], live_team: Dict[str, Any] | None) -> Dict[str, Any]:
+    if not isinstance(team, dict):
+        team = {}
+    if not isinstance(live_team, dict) or not live_team:
+        return team
+    merged = dict(team)
+    for key in ("score", "inBonus", "timeoutsRemaining", "periods"):
+        value = live_team.get(key)
+        if value not in (None, ""):
+            merged[key] = value
+    live_stats = live_team.get("statistics")
+    if isinstance(live_stats, dict):
+        merged["statistics"] = live_stats
+    return merged
+
+
+def _fetch_live_boxscore(game_id: str) -> Dict[str, Any] | None:
+    url = f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+    try:
+        resp = _logo_session.get(url, timeout=LIVE_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_logo(team_id: str | None, tricode: str | None = "") -> bytes | None:
@@ -415,6 +597,7 @@ def demo_boxscore() -> Dict[str, Any]:
     return {"game": game, "home": home, "away": away, "header": "No games", "shotclock": "--"}
 
 
+# ------------------ BOXSCORE STUB HELPER ------------------
 def _stub_boxscore_from_scoreboard(game_id: str) -> Dict[str, Any] | None:
     scores = _scoreboard_cache.get("data") or _load_disk_scoreboard() or {}
     games = scores.get("games") or []
@@ -445,22 +628,31 @@ def fetch_scores() -> Dict[str, Any]:
     """
     Return today's NBA games, including pre-game, with start times.
     """
-    if DEMO_MODE or not NBA_API_AVAILABLE or scoreboard is None:
+    if DEMO_MODE:
         disk = _load_disk_scoreboard()
         return disk or demo_scoreboard()
 
     now = time.monotonic()
+    disk_seed = None
 
     if _scoreboard_cache.get("data") is None:
         disk_seed = _load_disk_scoreboard()
         if disk_seed:
             _scoreboard_cache["data"] = disk_seed
-            _scoreboard_cache["ts"] = now
-            return disk_seed
+            # Seed from disk but force an immediate live refresh attempt.
+            _scoreboard_cache["ts"] = 0.0
 
     cached = _scoreboard_cache.get("data")
-    if cached and now - _scoreboard_cache["ts"] < SCOREBOARD_TTL:
+    if cached and now - _scoreboard_cache["ts"] < _scoreboard_cache_ttl(cached):
         return cached
+
+    if not NBA_API_AVAILABLE or scoreboard is None:
+        if cached:
+            return cached
+        disk = disk_seed or _load_disk_scoreboard()
+        if disk:
+            return disk
+        return {"games": [], "lines": ["No NBA games available"]}
 
     try:
         data = scoreboard.ScoreBoard().get_dict()
@@ -479,8 +671,8 @@ def fetch_scores() -> Dict[str, Any]:
             current = period.get("current") if isinstance(period, dict) else period
             clock = format_clock(g.get("gameClock"))
 
-            if status_value == 3 and g.get("gameStatusText"):
-                status = g.get("gameStatusText")
+            if status_value == 3:
+                status = g.get("gameStatusText") or "Final"
             elif status_value in (None, 0, 1) or not current:
                 status = _extract_start_time_text(g)
             else:
@@ -495,7 +687,7 @@ def fetch_scores() -> Dict[str, Any]:
         lines = [_format_game_line(g) for g in games]
 
         if not games:
-            result = demo_scoreboard()
+            result = {"games": [], "lines": ["No NBA games available"]}
         else:
             result = {"games": games, "lines": lines}
 
@@ -509,29 +701,116 @@ def fetch_scores() -> Dict[str, Any]:
         disk = _load_disk_scoreboard()
         if disk:
             return disk
-        return demo_scoreboard()
+        return {"games": [], "lines": ["No NBA games available"]}
 
 
 def fetch_boxscore(game_id: str) -> Dict[str, Any]:
-    if DEMO_MODE or not NBA_API_AVAILABLE or boxscore is None:
+    now = time.monotonic()
+    if DEMO_MODE:
+        live = _fetch_live_boxscore(game_id)
+        if isinstance(live, dict):
+            game = live.get("game") or {}
+            home = game.get("homeTeam") or {}
+            away = game.get("awayTeam") or {}
+            if home or away:
+                live_clock = _fetch_live_clock(game_id) or {}
+                if live_clock.get("gameClock") not in (None, ""):
+                    game["gameClock"] = live_clock.get("gameClock")
+                if live_clock.get("shotClock") not in (None, ""):
+                    game["shotClock"] = live_clock.get("shotClock")
+                if live_clock.get("statusText"):
+                    game["gameStatusText"] = live_clock.get("statusText")
+                if live_clock.get("period") not in (None, ""):
+                    lp = live_clock.get("period")
+                    game["period"] = {"current": lp} if not isinstance(lp, dict) else lp
+                home = _overlay_live_team_snapshot(home, live_clock.get("homeTeam"))
+                away = _overlay_live_team_snapshot(away, live_clock.get("awayTeam"))
+                if live_clock.get("homeScore") not in (None, ""):
+                    home["score"] = live_clock.get("homeScore")
+                if live_clock.get("awayScore") not in (None, ""):
+                    away["score"] = live_clock.get("awayScore")
+                current_period = _current_period_from_game(game)
+                shotclock = _resolve_shotclock(game_id, game, current_period)
+                header = _build_header(game)
+                status_val = game.get("gameStatus")
+                if status_val in (None, 0, 1) or not _current_period_from_game(game):
+                    game["gameStatusText"] = header
+                result = {
+                    "game": game,
+                    "home": home,
+                    "away": away,
+                    "header": header,
+                    "shotclock": shotclock,
+                }
+                _boxscore_cache[game_id] = (now, result)
+                _save_disk_boxscore(game_id, result)
+                return result
         disk = _load_disk_boxscore(game_id)
         stub = _stub_boxscore_from_scoreboard(game_id)
         result = stub or disk or demo_boxscore()
-        _boxscore_cache[game_id] = (time.monotonic(), result)
+        _boxscore_cache[game_id] = (now, result)
         return result
 
-    now = time.monotonic()
+    disk_box: Dict[str, Any] | None = None
 
     if game_id not in _boxscore_cache:
         disk_box = _load_disk_boxscore(game_id)
         if disk_box:
-            _boxscore_cache[game_id] = (now, disk_box)
-            return disk_box
+            # Seed from disk but force a live refresh before honoring TTL.
+            _boxscore_cache[game_id] = (0.0, disk_box)
 
     cached = _boxscore_cache.get(game_id)
-    if cached and now - cached[0] < BOXSCORE_TTL:
-        base = cached[1] or {}
-        game_cached = base.get("game") or {}
+
+    if not NBA_API_AVAILABLE or boxscore is None:
+        live = _fetch_live_boxscore(game_id)
+        if isinstance(live, dict):
+            game = live.get("game") or {}
+            home = game.get("homeTeam") or {}
+            away = game.get("awayTeam") or {}
+            if home or away:
+                live_clock = _fetch_live_clock(game_id) or {}
+                if live_clock.get("gameClock") not in (None, ""):
+                    game["gameClock"] = live_clock.get("gameClock")
+                if live_clock.get("shotClock") not in (None, ""):
+                    game["shotClock"] = live_clock.get("shotClock")
+                if live_clock.get("statusText"):
+                    game["gameStatusText"] = live_clock.get("statusText")
+                if live_clock.get("period") not in (None, ""):
+                    lp = live_clock.get("period")
+                    game["period"] = {"current": lp} if not isinstance(lp, dict) else lp
+                home = _overlay_live_team_snapshot(home, live_clock.get("homeTeam"))
+                away = _overlay_live_team_snapshot(away, live_clock.get("awayTeam"))
+                if live_clock.get("homeScore") not in (None, ""):
+                    home["score"] = live_clock.get("homeScore")
+                if live_clock.get("awayScore") not in (None, ""):
+                    away["score"] = live_clock.get("awayScore")
+                current_period = _current_period_from_game(game)
+                shotclock = _resolve_shotclock(game_id, game, current_period)
+                header = _build_header(game)
+                status_val = game.get("gameStatus")
+                if status_val in (None, 0, 1) or not _current_period_from_game(game):
+                    game["gameStatusText"] = header
+                result = {
+                    "game": game,
+                    "home": home,
+                    "away": away,
+                    "header": header,
+                    "shotclock": shotclock,
+                }
+                _boxscore_cache[game_id] = (now, result)
+                _save_disk_boxscore(game_id, result)
+                return result
+        stub = _stub_boxscore_from_scoreboard(game_id)
+        cached_payload = cached[1] if cached else None
+        result = stub or cached_payload or disk_box or {"game": {}, "home": {}, "away": {}, "header": "No games", "shotclock": "--"}
+        _boxscore_cache[game_id] = (now, result)
+        return result
+
+    if cached and now - cached[0] < _boxscore_cache_ttl(cached[1] if isinstance(cached, tuple) else None):
+        base = deepcopy(cached[1] or {})
+        game_cached = deepcopy(base.get("game") or {})
+        home_cached = deepcopy(base.get("home") or {})
+        away_cached = deepcopy(base.get("away") or {})
         current_period = _current_period_from_game(game_cached)
 
         live_clock = _fetch_live_clock(game_id) or {}
@@ -545,14 +824,20 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
             lp = live_clock.get("period")
             game_cached["period"] = {"current": lp} if not isinstance(lp, dict) else lp
             current_period = _current_period_from_game(game_cached)
+        home_cached = _overlay_live_team_snapshot(home_cached, live_clock.get("homeTeam"))
+        away_cached = _overlay_live_team_snapshot(away_cached, live_clock.get("awayTeam"))
+        if live_clock.get("homeScore") not in (None, ""):
+            home_cached["score"] = live_clock.get("homeScore")
+        if live_clock.get("awayScore") not in (None, ""):
+            away_cached["score"] = live_clock.get("awayScore")
 
         shotclock = _resolve_shotclock(game_id, game_cached, current_period)
         header = _build_header(game_cached)
         status_val = game_cached.get("gameStatus")
         if status_val in (None, 0, 1) or not _current_period_from_game(game_cached):
             game_cached["gameStatusText"] = header
-        result = {**base, "shotclock": shotclock, "header": header}
-        _boxscore_cache[game_id] = (cached[0], result)
+        result = {**base, "game": game_cached, "home": home_cached, "away": away_cached, "shotclock": shotclock, "header": header}
+        _boxscore_cache[game_id] = (now, result)
         _save_disk_boxscore(game_id, result)
         return result
 
@@ -561,7 +846,12 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
     except Exception:
         disk = _load_disk_boxscore(game_id)
         stub = _stub_boxscore_from_scoreboard(game_id)
-        result = stub or disk or demo_boxscore()
+        if stub:
+            result = stub
+        elif disk:
+            result = disk
+        else:
+            result = {"game": {}, "home": {}, "away": {}, "header": "No games", "shotclock": "--"}
         _boxscore_cache[game_id] = (time.monotonic(), result)
         return result
 
@@ -586,6 +876,12 @@ def fetch_boxscore(game_id: str) -> Dict[str, Any]:
             game["period"] = {"current": lp} if not isinstance(lp, dict) else lp
         if live_clock.get("statusText"):
             game["gameStatusText"] = live_clock.get("statusText")
+        home = _overlay_live_team_snapshot(home, live_clock.get("homeTeam"))
+        away = _overlay_live_team_snapshot(away, live_clock.get("awayTeam"))
+        if live_clock.get("homeScore") not in (None, ""):
+            home["score"] = live_clock.get("homeScore")
+        if live_clock.get("awayScore") not in (None, ""):
+            away["score"] = live_clock.get("awayScore")
 
     current_period = _current_period_from_game(game)
     shotclock = _resolve_shotclock(game_id, game, current_period)
@@ -619,8 +915,8 @@ def _build_header(game: Dict[str, Any]) -> str:
     clock = format_clock(game.get("gameClock"))
     status_text = (game.get("gameStatusText") or "").strip()
 
-    if status_value == 3 and status_text:
-        return status_text
+    if status_value == 3:
+        return status_text or "Final"
 
     if status_value in (None, 0, 1) or not current_period:
         return _extract_start_time_text(game)
@@ -635,6 +931,7 @@ sport_table_headers = ["#", "Player", "Min", "Pos", "Pts", "Reb", "Ast", "3pt"]
 
 
 def build_player_rows(team: Dict[str, Any]) -> List[List[str]]:
+    _apply_player_positions(team)
     players = team.get("players", []) or []
     def _order(p: Dict[str, Any]) -> Any:
         return p.get("order", 9999)
@@ -669,7 +966,7 @@ def build_player_rows(team: Dict[str, Any]) -> List[List[str]]:
         first = (p.get("firstName") or "").strip()
         last = (p.get("familyName") or "").strip()
         name = format_player_initial_name(first, last)
-        pos = p.get("position") or ""
+        pos = _player_position_text(p)
         minutes = format_time_played(stats.get("minutes") or stats.get("minutesCalculated"))
         pts = str(stats.get("points", 0))
         reb = str(stats.get("reboundsTotal", stats.get("rebounds", 0)))

@@ -159,6 +159,11 @@ def get_boxscore(game_id: str) -> Dict[str, Any]:
     shotclock = raw.get("shotclock") or backend.format_shotclock(game.get("shotClock"))
     home = raw.get("home") or {}
     away = raw.get("away") or {}
+    for team in (home, away):
+        try:
+            backend._apply_player_positions(team)
+        except Exception:
+            continue
     apply_starting_lineups("NBA", home, away)
     return {
         "game": game,
