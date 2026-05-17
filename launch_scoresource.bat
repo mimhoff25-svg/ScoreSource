@@ -35,5 +35,5 @@ if %errorlevel%==0 (
     exit /b %errorlevel%
 )
 
-echo Python 3 was not found. Install Python 3.10 or 3.11 first.
+echo Python 3 was not found. ScoreSource is tested on Python 3.10 and 3.11.
 exit /b 1

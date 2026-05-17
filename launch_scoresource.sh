@@ -11,7 +11,7 @@ if [[ ! -x "$PY_CMD" ]]; then
 fi
 [[ -n "${PY_CMD:-}" ]] || { echo "Python was not found." >&2; exit 1; }
 
-if [[ "$(uname -s 2>/dev/null || true)" == "Linux" && -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
     for preferred in 20 0 1 10; do
         if [[ -S "/tmp/.X11-unix/X$preferred" ]]; then
             export DISPLAY=":$preferred.0"
