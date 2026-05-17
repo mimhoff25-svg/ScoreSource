@@ -36,4 +36,4 @@ if %errorlevel%==0 (
 )
 
 echo Python 3 was not found. Install Python 3.10 or 3.11 first.
-exit /b %errorlevel%
+exit /b 1

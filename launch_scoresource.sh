@@ -18,7 +18,7 @@ if [[ "$(uname -s 2>/dev/null || true)" == "Linux" && -z "${DISPLAY:-}" && -z "$
             break
         fi
     done
-    if [[ -z "${DISPLAY:-}" && -d /tmp/.X11-unix ]]; then
+    if [[ -z "${DISPLAY:-}" ]]; then
         while IFS= read -r sock; do
             [[ -S "$sock" ]] || continue
             display_num="${sock##/tmp/.X11-unix/X}"
