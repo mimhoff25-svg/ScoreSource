@@ -86,6 +86,7 @@ def test_main_smoke(monkeypatch):
 
     monkeypatch.setattr(main_module, "QApplication", DummyApp)
     monkeypatch.setattr(main_module, "ScoreSourceWindow", DummyWindow)
+    monkeypatch.setattr(main_module, "_acquire_instance_lock", lambda: True)
     monkeypatch.setattr(main_module.sys, "exit", lambda code=0: (_ for _ in ()).throw(SystemExit(code)))
 
     with pytest.raises(SystemExit) as excinfo:
@@ -96,6 +97,15 @@ def test_main_smoke(monkeypatch):
     assert events["exec_called"] is True
     assert events["window_kwargs"]["sport_name"] == "NBA"
     assert events["window_kwargs"]["logic"].current_sport == "NBA"
+
+
+def test_main_exits_when_instance_lock_is_held(monkeypatch, capsys):
+    monkeypatch.setattr(main_module, "_acquire_instance_lock", lambda: False)
+
+    main_module.main()
+
+    captured = capsys.readouterr()
+    assert "already running" in captured.err
 
 
 def test_sports_package_imports_cleanly():

@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 
+from ..common.paths import cache_dir
+
 # --- required identifiers -------------------------------------------------
 SPORT = "template"
 
@@ -27,7 +29,7 @@ TEAM_COLORS = TEAM_PRIMARY_COLORS
 TEAM_ALT_COLORS = TEAM_ACCENT_COLORS
 
 # --- caching ---------------------------------------------------------------
-CACHE_ROOT = Path.home() / ".cache" / "scoresource"
+CACHE_ROOT = cache_dir()
 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 SCOREBOARD_CACHE_PATH = CACHE_ROOT / f"{SPORT}_scoreboard.json"
 BOXSCORE_CACHE_DIR = CACHE_ROOT / f"{SPORT}_boxscores"

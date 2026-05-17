@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Tuple
 import requests
 import xml.etree.ElementTree as ET
 
+from scoresource.common.paths import cache_dir
+
 # Prefer shared time formatter from scoresource if available
 try:
     from scoresource.common.timefmt import format_start_time as _shared_format_start_time
@@ -48,10 +50,7 @@ def _env_float(name: str, default: float, *, min_value: float | None = None) -> 
 
 
 def _cache_root_from_env() -> Path:
-    raw = os.environ.get("SCORESOURCE_CACHE_DIR")
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / ".cache" / "scoresource"
+    return cache_dir()
 
 # ------------------ TEAM COLORS (unchanged) ------------------
 TEAM_PRIMARY_COLORS: Dict[str, str] = {

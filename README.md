@@ -15,8 +15,10 @@ Fixed-resolution (1280x400) PySide6 LED scoreboard for multi-sport coverage (NBA
 - Python 3.10 or 3.11
 - pip and virtualenv (recommended)
 - LED target: 1280x400 panel (desktop works for development)
+- Windows 10 support currently targets source-based launches (`python -m scoresource.main` or `launch_scoresource.bat`), not a packaged `.exe`
 
 ### Quickstart
+Linux/macOS:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
@@ -24,10 +26,21 @@ pip install -r requirements.txt
 python -m scoresource.main
 ```
 
-Alternate launcher:
+Windows 10 (PowerShell):
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m scoresource.main
+```
+
+Convenience launchers:
 ```bash
 python launcher.py
 ```
+
+- Linux: `./launch_scoresource.sh`
+- Windows: `launch_scoresource.bat`
 
 ### Environment
 - `SCORESOURCE_REALTIME_ENABLED` (default: on) — disable to force scheduled-only mode
@@ -37,7 +50,14 @@ python launcher.py
 ### Testing
 ```bash
 python -m pip install -r requirements.txt
-pytest
+python -m pip install pytest
+QT_QPA_PLATFORM=offscreen python -m pytest
+```
+
+On Windows PowerShell, use:
+```powershell
+$env:QT_QPA_PLATFORM = "offscreen"
+python -m pytest
 ```
 
 Targeted regression coverage for the recent card/profile work lives in `tests/test_logic.py`.

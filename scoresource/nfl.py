@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple
 import requests
 
 from .common.utils import format_player_initial_name
+from .common.paths import cache_dir
 from .common.lineups import apply_starting_lineups
 from .common.timefmt import format_start_time
 
@@ -29,10 +30,7 @@ def _env_float(name: str, default: float, *, min_value: float | None = None) -> 
 
 
 def _cache_root_from_env() -> Path:
-    raw = os.environ.get("SCORESOURCE_CACHE_DIR")
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / ".cache" / "scoresource"
+    return cache_dir()
 
 
 SCOREBOARD_URL = "https://cdn.espn.com/core/nfl/scoreboard?xhr=1&render=false"

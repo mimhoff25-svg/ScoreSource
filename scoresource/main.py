@@ -1,22 +1,29 @@
 from __future__ import annotations
 
-import glob
-import os
 import sys
 from typing import Dict
 
-# Auto-detect X display if not set (e.g. launched from a bare terminal)
-if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-    _socks = sorted(glob.glob("/tmp/.X11-unix/X*"))
-    if _socks:
-        _num = _socks[0].replace("/tmp/.X11-unix/X", "")
-        os.environ["DISPLAY"] = f":{_num}"
-
+from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
 
+from .common.paths import state_dir
 from .ui import ScoreSourceWindow
 from .logic import ScoreSourceLogic
 from .registry import DEFAULT_SPORT_DISPLAY, SPORT_ORDER, get_sport_config
+
+_INSTANCE_LOCK: QLockFile | None = None
+
+
+def _acquire_instance_lock() -> bool:
+    global _INSTANCE_LOCK
+    lock_path = state_dir() / "scoresource.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(lock_path))
+    lock.setStaleLockTime(0)
+    if not lock.tryLock(0):
+        return False
+    _INSTANCE_LOCK = lock
+    return True
 
 
 def _switch_sport(name: str, window: ScoreSourceWindow) -> None:
@@ -59,7 +66,15 @@ def _switch_sport(name: str, window: ScoreSourceWindow) -> None:
 
 
 def main() -> None:
+    if not _acquire_instance_lock():
+        print("ScoreSource is already running.", file=sys.stderr)
+        return
+
     app = QApplication(sys.argv)
+    if hasattr(app, "setApplicationName"):
+        app.setApplicationName("ScoreSource")
+    if hasattr(app, "setApplicationDisplayName"):
+        app.setApplicationDisplayName("ScoreSource")
 
     config = get_sport_config(DEFAULT_SPORT_DISPLAY)
     if not config:

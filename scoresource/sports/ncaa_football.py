@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 
+from ..common.paths import cache_dir
+
 SPORT = "ncaa_football"
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/football/college-football/summary?event={game_id}"
@@ -31,10 +33,7 @@ def _env_float(name: str, default: float, *, min_value: float | None = None) -> 
 
 
 def _cache_root_from_env() -> Path:
-    raw = os.environ.get("SCORESOURCE_CACHE_DIR")
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / ".cache" / "scoresource"
+    return cache_dir()
 
 TEAM_PRIMARY_COLORS: Dict[str, str] = {}
 TEAM_SECONDARY_COLORS: Dict[str, str] = {}
