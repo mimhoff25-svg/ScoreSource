@@ -27,9 +27,11 @@ def test_nba_boxscore_contains_player_stats(monkeypatch):
     data = logic.fetch_scores_for_sport("NBA")
     games = data.get("games") or []
     # Note: games list may be empty when API is unavailable
-    if games:
-        game_id = games[0]["gameId"]
-        box = logic.get_boxscore(game_id)
+    if not games:
+        return
+
+    game_id = games[0]["gameId"]
+    box = logic.get_boxscore(game_id)
     # Check home and away player lists
     for team_key in ("home", "away"):
         team = box.get(team_key, {})
