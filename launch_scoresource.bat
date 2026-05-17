@@ -35,5 +35,5 @@ if %errorlevel%==0 (
     exit /b %errorlevel%
 )
 
-echo Python 3 was not found. ScoreSource is tested on Python 3.10 and 3.11.
+echo No compatible Python launcher was found in the virtual environment or on PATH. ScoreSource is tested on Python 3.10 and 3.11.
 exit /b 1

@@ -101,12 +101,6 @@ def test_main_smoke(monkeypatch):
 
 def test_main_exits_when_instance_lock_is_held(monkeypatch, capsys):
     events = {"app_created": False, "window_created": False}
-    exit_called = False
-
-    def fail_exit(code=0):
-        nonlocal exit_called
-        exit_called = True
-        raise SystemExit(code)
 
     class DummyApp:
         def __init__(self, argv):
@@ -119,13 +113,11 @@ def test_main_exits_when_instance_lock_is_held(monkeypatch, capsys):
     monkeypatch.setattr(main_module, "_acquire_instance_lock", lambda: False)
     monkeypatch.setattr(main_module, "QApplication", DummyApp)
     monkeypatch.setattr(main_module, "ScoreSourceWindow", DummyWindow)
-    monkeypatch.setattr(main_module.sys, "exit", fail_exit)
 
     main_module.main()
 
     captured = capsys.readouterr()
     assert "already running" in captured.err
-    assert exit_called is False
     assert events["app_created"] is False
     assert events["window_created"] is False
 
