@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Tuple
 import requests
 import logging
 
+from ..common.paths import cache_dir
+
 SPORT = "nhl"
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"
 
@@ -79,7 +81,7 @@ _boxscore_cache: Dict[str, Tuple[float, Any]] = {}
 SCOREBOARD_TTL = 15.0
 BOXSCORE_TTL = 12.0
 
-CACHE_ROOT = Path.home() / ".cache" / "scoresource"
+CACHE_ROOT = cache_dir()
 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 SCOREBOARD_CACHE_PATH = CACHE_ROOT / f"{SPORT}_scoreboard.json"
 BOXSCORE_CACHE_DIR = CACHE_ROOT / f"{SPORT}_boxscores"

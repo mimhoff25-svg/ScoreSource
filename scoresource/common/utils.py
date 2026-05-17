@@ -11,7 +11,9 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import requests
 import logging
 
-CACHE_DIR = Path.home() / ".cache" / "scoresource"
+from .paths import cache_dir
+
+CACHE_DIR = cache_dir()
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)

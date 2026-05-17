@@ -12,6 +12,7 @@ import requests
 import logging
 
 from .common.lineups import apply_starting_lineups
+from .common.paths import cache_dir
 from .common.timefmt import format_start_time, normalize_espn_time_str
 from .common.utils import format_player_initial_name
 
@@ -32,10 +33,7 @@ def _env_float(name: str, default: float, *, min_value: float | None = None) -> 
 
 
 def _cache_root_from_env() -> Path:
-    raw = os.environ.get("SCORESOURCE_CACHE_DIR")
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / ".cache" / "scoresource"
+    return cache_dir()
 
 
 SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/scoreboard"

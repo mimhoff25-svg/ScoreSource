@@ -2,8 +2,8 @@
 Type=Application
 Name=ScoreSource
 Comment=ScoreSource PySide6 scoreboard
-Exec=/home/mike/projects/ScoreScource/launch_scoresource.sh
-Icon=/home/mike/projects/ScoreScource/pyside/scoresource.svg
+Exec=sh -c 'cd "$(dirname "$1")" && ./launch_scoresource.sh' sh %k
+Icon=scoresource
 Terminal=false
 Categories=Sports;Game;Utility;
 StartupNotify=true

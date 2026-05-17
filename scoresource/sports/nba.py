@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 
+from ..common.paths import cache_dir
 from ..common.utils import extract_three_point_made, format_player_initial_name
 
 NBA_API_AVAILABLE = True
@@ -40,10 +41,7 @@ def _env_float(name: str, default: float, *, min_value: float | None = None) -> 
 
 
 def _cache_root_from_env() -> Path:
-    raw = os.environ.get("SCORESOURCE_CACHE_DIR")
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / ".cache" / "scoresource"
+    return cache_dir()
 
 # ------------------ TEAM COLORS (unchanged) ------------------
 TEAM_PRIMARY_COLORS: Dict[str, str] = {

@@ -73,6 +73,7 @@ PLAYER_CONTEXT_ROLE = Qt.UserRole + 20
 GAME_LOGO_SIZE = 36
 
 from .. import nba as default_backend
+from ..common.paths import state_dir
 from ..logic import ScoreSourceLogic
 from ..sports_meta import canonicalize_sport_name
 from ..realtime import RealTimeGameState
@@ -180,7 +181,7 @@ BOARD_NAME_FONT_PX = 14
 BOARD_STAT_FONT_PX = 13
 BOARD_META_FONT_PX = 11
 BOARD_PLAYER_ROW_LIMIT = 5
-STATE_PATH = Path.home() / ".cache" / "scoresource" / "state.json"
+STATE_PATH = state_dir() / "state.json"
 STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 

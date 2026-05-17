@@ -22,6 +22,7 @@ from urllib.parse import quote_plus
 import requests
 
 from .common.lineups import ESPN_SPORT_PATH
+from .common.paths import cache_dir
 from .common.utils import iso_to_local
 from .common.timefmt import format_start_time
 from .sports_meta import canonicalize_sport_name
@@ -56,7 +57,7 @@ NORMALIZED_FETCHERS: Dict[str, Callable[[], Dict[str, Any]]] = {
     "MLS": sports_mls.fetch_live,
 }
 
-LOGO_CACHE_ROOT = Path.home() / ".cache" / "scoresource" / "logos"
+LOGO_CACHE_ROOT = cache_dir() / "logos"
 LOGO_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)

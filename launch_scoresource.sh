@@ -3,12 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_PY="$SCRIPT_DIR/.venv/bin/python"
-LEGACY_VENV="$HOME/projects/envs/scoresource_env/bin/python"
-LOG_DIR="$HOME/.local/share/scoresource"
-LOG_FILE="$LOG_DIR/scoreboard.log"
-
-mkdir -p "$LOG_DIR"
 cd "$SCRIPT_DIR"
+
+PY_CMD="$VENV_PY"
+if [[ ! -x "$PY_CMD" ]]; then
+    PY_CMD="$(command -v python3 || command -v python)"
+fi
+[[ -n "${PY_CMD:-}" ]] || { echo "Python was not found." >&2; exit 1; }
 
 if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
     for preferred in 20 0 1 10; do
@@ -29,18 +30,9 @@ if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
     fi
 fi
 
-PY_CMD="$VENV_PY"
-if [[ ! -x "$PY_CMD" && -x "$LEGACY_VENV" ]]; then
-    PY_CMD="$LEGACY_VENV"
-fi
-if [[ ! -x "$PY_CMD" ]]; then
-    PY_CMD="$(command -v python3)"
-fi
-
-# Keep one live ScoreSource process so users do not end up interacting with
-# stale windows from earlier runs.
-pkill -f '/home/mike/projects/ScoreScource/.venv/bin/python -m scoresource.main' >/dev/null 2>&1 || true
-pkill -f "$LEGACY_VENV -m scoresource.main" >/dev/null 2>&1 || true
+LOG_DIR="$("$PY_CMD" -c 'from scoresource.common.paths import log_dir; print(log_dir())')"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/scoreboard.log"
 
 {
     echo "===== ScoreSource launch $(date -Is) ====="

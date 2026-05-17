@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Tuple, Union
 import requests
 from requests import Session
 
+from ..common.paths import cache_dir
 from ..common.ttl_cache import TTLCache
 from ..common.utils import format_player_initial_name
 
@@ -164,7 +165,7 @@ TEAM_ALT_COLORS = TEAM_ACCENT_COLORS
 _scoreboard_cache: Dict[str, Any] = {"ts": 0.0, "data": None}
 _boxscore_cache: TTLCache = TTLCache(maxsize=BOXSCORE_CACHE_MAXSIZE, ttl=BOXSCORE_TTL)
 
-CACHE_ROOT = Path.home() / ".cache" / "scoresource"
+CACHE_ROOT = cache_dir()
 CACHE_ROOT.mkdir(parents=True, exist_ok=True)
 SCOREBOARD_CACHE_PATH = CACHE_ROOT / f"{SPORT}_scoreboard.json"
 BOXSCORE_CACHE_DIR = CACHE_ROOT / f"{SPORT}_boxscores"
